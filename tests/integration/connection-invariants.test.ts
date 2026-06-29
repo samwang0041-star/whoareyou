@@ -118,4 +118,42 @@ describe("connection invariants", () => {
       }),
     ).rejects.toThrow();
   });
+
+  it("detects existing cross-column active-state conflicts during validation", async () => {
+    const userA = await createUser("connection-preflight-a");
+    const userB = await createUser("connection-preflight-b");
+    const userC = await createUser("connection-preflight-c");
+
+    try {
+      await prisma.$executeRaw`
+        ALTER TABLE "Connection"
+        DISABLE TRIGGER "enforce_single_active_connection_per_user_trigger"
+      `;
+
+      await prisma.connection.create({
+        data: {
+          userAId: userA.id,
+          userBId: userB.id,
+          state: "active",
+        },
+      });
+
+      await prisma.connection.create({
+        data: {
+          userAId: userC.id,
+          userBId: userA.id,
+          state: "ending",
+        },
+      });
+    } finally {
+      await prisma.$executeRaw`
+        ALTER TABLE "Connection"
+        ENABLE TRIGGER "enforce_single_active_connection_per_user_trigger"
+      `;
+    }
+
+    await expect(
+      prisma.$executeRaw`SELECT "validate_single_active_connection_per_user"()`,
+    ).rejects.toThrow(/active-state connection/);
+  });
 });
