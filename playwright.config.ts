@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const reuseExistingServer = !process.env.DATABASE_URL;
+
 export default defineConfig({
   testDir: "tests/e2e",
   use: {
@@ -9,7 +11,7 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     url: "http://127.0.0.1:3000",
-    reuseExistingServer: true,
+    reuseExistingServer,
     timeout: 120000,
   },
   projects: [
