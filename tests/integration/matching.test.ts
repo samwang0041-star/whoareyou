@@ -211,6 +211,47 @@ describe("transactional matching", () => {
     await expect(prisma.connection.count()).resolves.toBe(1);
   });
 
+  it("allows a user with an awaiting echo connection to match someone new", async () => {
+    const currentUser = await createMatchableUser("matching-echo-current");
+    const pastUser = await prisma.user.create({
+      data: {
+        providerUserHash: "matching-echo-past",
+        state: "cooldown",
+        matchingEnabled: true,
+        reachableUntil,
+      },
+    });
+    const candidate = await createMatchableUser("matching-echo-candidate");
+    await prisma.connection.create({
+      data: {
+        userAId: currentUser.id,
+        userBId: pastUser.id,
+        state: "awaiting_echo",
+        startedAt: new Date(now.getTime() - 60 * 60_000),
+        closedAt: now,
+        closeReason: "timeout",
+      },
+    });
+
+    const result = await tryMatchUser({
+      userId: currentUser.id,
+      now,
+      minReachableMinutesToMatch: 60,
+    });
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") throw new Error("expected a match");
+    await expect(
+      prisma.connection.findUniqueOrThrow({
+        where: { id: result.connectionId },
+      }),
+    ).resolves.toMatchObject({
+      userAId: currentUser.id,
+      userBId: candidate.id,
+      state: "active",
+    });
+  });
+
   it.each(["blocked", "paused"] as const)("returns not eligible for a %s user", async (state) => {
     const currentUser = await prisma.user.create({
       data: {

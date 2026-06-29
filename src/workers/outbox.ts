@@ -29,6 +29,19 @@ export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
   const result = { processed: 0, sent: 0, retried: 0, failed: 0, providerWindowExpired: 0 };
 
   for (const message of messages) {
+    const claimed = await prisma.messageOutbox.updateMany({
+      where: {
+        id: message.id,
+        status: { in: ["pending", "retrying"] },
+        nextAttemptAt: { lte: input.now },
+      },
+      data: {
+        status: "retrying",
+        nextAttemptAt: addSeconds(input.now, 30),
+      },
+    });
+    if (claimed.count === 0) continue;
+
     result.processed += 1;
 
     if (isProviderWindowExpired(input.now, message.recipient.reachableUntil) || message.recipient.providerSendQuota <= 0) {
@@ -61,7 +74,7 @@ export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
         data: {
           status: exhausted ? "failed" : "retrying",
           retryCount,
-          nextAttemptAt: input.now,
+          nextAttemptAt: exhausted ? input.now : addSeconds(input.now, retryCount * 30),
           failedAt: exhausted ? input.now : null,
         },
       });
@@ -112,6 +125,10 @@ async function markProviderWindowExpired(messageId: string, recipientUserId: str
       },
     });
   });
+}
+
+function addSeconds(date: Date, seconds: number): Date {
+  return new Date(date.getTime() + seconds * 1000);
 }
 
 function envInt(name: string, fallback: number): number {

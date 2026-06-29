@@ -12,6 +12,8 @@ async function createUser(providerUserHash: string) {
 
 describe("connection invariants", () => {
   beforeEach(async () => {
+    await prisma.messageOutbox.deleteMany();
+    await prisma.scheduledJob.deleteMany();
     await prisma.connection.deleteMany();
     await prisma.user.deleteMany();
   });
@@ -117,6 +119,40 @@ describe("connection invariants", () => {
         data: { state: "active" },
       }),
     ).rejects.toThrow();
+  });
+
+  it("allows an awaiting echo connection and a new active connection for the same user", async () => {
+    const userA = await createUser("connection-echo-a");
+    const userB = await createUser("connection-echo-b");
+    const userC = await createUser("connection-echo-c");
+
+    await expect(
+      prisma.connection.create({
+        data: {
+          userAId: userA.id,
+          userBId: userB.id,
+          state: "awaiting_echo",
+        },
+      }),
+    ).resolves.toMatchObject({
+      userAId: userA.id,
+      userBId: userB.id,
+      state: "awaiting_echo",
+    });
+
+    await expect(
+      prisma.connection.create({
+        data: {
+          userAId: userC.id,
+          userBId: userA.id,
+          state: "active",
+        },
+      }),
+    ).resolves.toMatchObject({
+      userAId: userC.id,
+      userBId: userA.id,
+      state: "active",
+    });
   });
 
   it("detects existing cross-column active-state conflicts during validation", async () => {

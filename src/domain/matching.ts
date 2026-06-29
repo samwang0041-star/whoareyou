@@ -3,7 +3,7 @@ import type { ConnectionState, UserState } from "@prisma/client";
 import { prisma } from "../storage/prisma";
 import { voice } from "./voice";
 
-const activeConnectionStates: ConnectionState[] = ["active", "ending", "awaiting_echo"];
+const activeConnectionStates: ConnectionState[] = ["active", "ending"];
 const candidateStates: UserState[] = ["available", "waiting"];
 const maxMatchAttempts = 3;
 const retryablePrismaCodes = new Set(["P2034", "P2002"]);

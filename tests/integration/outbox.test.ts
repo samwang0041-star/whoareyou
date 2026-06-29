@@ -179,6 +179,7 @@ describe("outbox", () => {
       },
     });
 
+    const retryAt = new Date(now.getTime() + 30_000);
     await processOutboxBatch({
       now,
       limit: 10,
@@ -196,7 +197,7 @@ describe("outbox", () => {
     });
 
     await processOutboxBatch({
-      now,
+      now: retryAt,
       limit: 10,
       maxRetries: 2,
       send: async () => {
@@ -207,8 +208,45 @@ describe("outbox", () => {
     await expect(prisma.messageOutbox.findUniqueOrThrow({ where: { id: message.id } })).resolves.toMatchObject({
       status: "failed",
       retryCount: 2,
-      failedAt: now,
+      failedAt: retryAt,
       bodyCiphertextOrBody: "retry me",
+    });
+  });
+
+  it("claims messages before sending so concurrent batches do not duplicate provider sends", async () => {
+    const user = await createReachableUser("outbox-concurrent-recipient");
+    await prisma.messageOutbox.create({
+      data: {
+        recipientUserId: user.id,
+        idempotencyKey: "outbox-concurrent-message",
+        bodyCiphertextOrBody: "send once",
+        nextAttemptAt: now,
+      },
+    });
+
+    const sent: string[] = [];
+    await Promise.all([
+      processOutboxBatch({
+        now,
+        limit: 10,
+        send: async (message) => {
+          sent.push(message.idempotencyKey);
+        },
+      }),
+      processOutboxBatch({
+        now,
+        limit: 10,
+        send: async (message) => {
+          sent.push(message.idempotencyKey);
+        },
+      }),
+    ]);
+
+    expect(sent).toEqual(["outbox-concurrent-message"]);
+    await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
+      status: "sent",
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
     });
   });
 });
