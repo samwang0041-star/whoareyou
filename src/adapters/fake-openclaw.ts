@@ -3,7 +3,7 @@ import { z } from "zod";
 import { parseCommand } from "../domain/commands";
 import { findOrCreateUserFromInbound } from "../domain/identity";
 import { tryMatchUser } from "../domain/matching";
-import { closeForLeave, reportConnection } from "../domain/safety";
+import { closeForLeave, reportConnection, submitEcho } from "../domain/safety";
 import type { NormalizedInboundEvent, OutboundMessage } from "../domain/types";
 import { voice } from "../domain/voice";
 import { prisma } from "../storage/prisma";
@@ -71,7 +71,11 @@ async function claimInbound(event: NormalizedInboundEvent, claimedAt: Date): Pro
     });
     return true;
   } catch (error) {
-    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event, claimedAt);
+    if (isUniqueConstraintError(error)) {
+      const reclaimed = await reclaimExistingInbound(event, claimedAt);
+      if (!reclaimed) await recordDuplicateInbound(event.providerMessageKey);
+      return reclaimed;
+    }
     throw error;
   }
 }
@@ -194,6 +198,21 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
     return;
   }
 
+  const echoConnection = await findAwaitingEchoConnection(user.id);
+  if (echoConnection) {
+    try {
+      await submitEcho({
+        connectionId: echoConnection.id,
+        fromUserId: user.id,
+        body: command.text,
+        now: event.receivedAt,
+      });
+    } catch (error) {
+      if (!isExpectedEchoRejection(error)) throw error;
+    }
+    return;
+  }
+
   await enqueueNoActiveMatch({ recipientUserId: user.id, event });
 }
 
@@ -204,6 +223,23 @@ async function findActiveConnection(userId: string) {
       OR: [{ userAId: userId }, { userBId: userId }],
     },
     orderBy: { startedAt: "desc" },
+  });
+}
+
+async function findAwaitingEchoConnection(userId: string) {
+  return prisma.connection.findFirst({
+    where: {
+      state: "awaiting_echo",
+      OR: [{ userAId: userId }, { userBId: userId }],
+    },
+    orderBy: { closedAt: "desc" },
+  });
+}
+
+async function recordDuplicateInbound(providerMessageKey: string) {
+  await prisma.inboundDedupe.updateMany({
+    where: { providerMessageKey },
+    data: { duplicateCount: { increment: 1 } },
   });
 }
 
@@ -249,4 +285,8 @@ function envInt(name: string, fallback: number): number {
 
 function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+function isExpectedEchoRejection(error: unknown): boolean {
+  return error instanceof Error && (error.message === "echo_already_submitted" || error.message === "echo_body_too_long");
 }

@@ -319,12 +319,14 @@ export async function listConnections(state?: ConnectionState): Promise<Connecti
 export async function getHealthMetrics(): Promise<HealthMetrics> {
   const [
     callbackRows,
+    duplicateCallbacks,
     outboxRows,
     activeAppErrors,
     activeErrorRows,
     workerHeartbeats,
   ] = await Promise.all([
-    prisma.inboundDedupe.findMany({ select: { status: true } }),
+    prisma.inboundDedupe.findMany({ select: { status: true, duplicateCount: true } }),
+    prisma.inboundDedupe.aggregate({ _sum: { duplicateCount: true } }),
     prisma.messageOutbox.findMany({ select: { status: true } }),
     prisma.appError.count({ where: { resolvedAt: null } }),
     prisma.appError.findMany({ where: { resolvedAt: null }, select: { severity: true } }),
@@ -344,7 +346,7 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
   return {
     generatedAt: new Date().toISOString(),
     callbacksTotal: callbackRows.length,
-    callbackDuplicates: callbacksByStatus.get("duplicate") ?? 0,
+    callbackDuplicates: (callbacksByStatus.get("duplicate") ?? 0) + (duplicateCallbacks._sum.duplicateCount ?? 0),
     callbackFailed: callbacksByStatus.get("failed") ?? 0,
     callbacksByStatus: toSortedCountRows(callbacksByStatus, "status"),
     outbox,

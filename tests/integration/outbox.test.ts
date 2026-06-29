@@ -344,4 +344,41 @@ describe("outbox", () => {
       bodyCiphertextOrBody: null,
     });
   });
+
+  it("recovers stale sending messages and restores reserved quota before retrying", async () => {
+    const user = await createReachableUser("outbox-stale-sending-recipient", 998);
+    await prisma.messageOutbox.create({
+      data: {
+        recipientUserId: user.id,
+        idempotencyKey: "outbox-stale-sending-message",
+        bodyCiphertextOrBody: "send after recovery",
+        status: "sending",
+        nextAttemptAt: new Date(now.getTime() - 6 * 60_000),
+        providerWindowCheckedAt: new Date(now.getTime() - 6 * 60_000),
+      },
+    });
+
+    const sent: string[] = [];
+    await processOutboxBatch({
+      now,
+      limit: 10,
+      send: async (message) => {
+        sent.push(`${message.idempotencyKey}:${message.body}`);
+      },
+    });
+
+    expect(sent).toEqual(["outbox-stale-sending-message:send after recovery"]);
+    await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
+      status: "sent",
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
+      sentAt: now,
+    });
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { providerSendQuota: true },
+      }),
+    ).resolves.toEqual({ providerSendQuota: 998 });
+  });
 });

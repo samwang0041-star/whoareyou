@@ -94,6 +94,7 @@ describe("fake OpenClaw callback", () => {
     await expect(handleFakeInbound(input)).resolves.toEqual({ status: "duplicate" });
 
     await expect(prisma.inboundDedupe.count()).resolves.toBe(1);
+    await expect(prisma.inboundDedupe.findFirstOrThrow()).resolves.toMatchObject({ duplicateCount: 1 });
     await expect(prisma.messageOutbox.count()).resolves.toBe(1);
     await expect(prisma.user.findFirstOrThrow()).resolves.toMatchObject({
       providerUserHash: hashProviderUserId("raw-provider-user"),
@@ -248,6 +249,32 @@ describe("fake OpenClaw callback", () => {
       where: { providerUserHash: hashProviderUserId("leave-user-a") },
     });
     expect([activeConnection.userAId, activeConnection.userBId]).toContain(reopenedUser.id);
+  });
+
+  it("stores one echo from an awaiting echo connection instead of treating it as unmatched chat", async () => {
+    const connection = await createOpenMatch("echo-callback-user-a", "echo-callback-user-b");
+    const echoUser = await prisma.user.findUniqueOrThrow({
+      where: { providerUserHash: hashProviderUserId("echo-callback-user-a") },
+    });
+
+    await sendFake({ providerMessageKey: "echo-callback-leave", providerUserId: "echo-callback-user-a", text: "离开" });
+    await sendFake({ providerMessageKey: "echo-callback-message", providerUserId: "echo-callback-user-a", text: "谢谢这一小时" });
+
+    await expect(
+      prisma.echo.findUniqueOrThrow({
+        where: {
+          connectionId_fromUserId: {
+            connectionId: connection.id,
+            fromUserId: echoUser.id,
+          },
+        },
+      }),
+    ).resolves.toMatchObject({
+      connectionId: connection.id,
+      fromUserId: echoUser.id,
+      body: "[redacted]",
+    });
+    await expect(prisma.messageOutbox.findUnique({ where: { idempotencyKey: "echo-callback-message:no-match" } })).resolves.toBeNull();
   });
 
   it("handles report by recording the report and closing the active connection", async () => {

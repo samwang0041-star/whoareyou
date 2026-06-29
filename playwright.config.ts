@@ -4,6 +4,7 @@ const reuseExistingServer = !process.env.DATABASE_URL;
 
 export default defineConfig({
   testDir: "tests/e2e",
+  workers: process.env.DATABASE_URL ? 1 : undefined,
   use: {
     baseURL: "http://127.0.0.1:3000",
     trace: "retain-on-failure",

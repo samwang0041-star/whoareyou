@@ -1,14 +1,17 @@
 "use client";
 
+import Link from "next/link";
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 import type { AdminOverview } from "../../src/workers/admin-metrics";
+import type { ConnectionListItem } from "../../src/workers/admin-details";
 
 type DashboardStatus = "locked" | "loading" | "ready" | "error";
 
 export default function AdminPage() {
   const [token, setToken] = useState("");
   const [overview, setOverview] = useState<AdminOverview | null>(null);
+  const [connections, setConnections] = useState<ConnectionListItem[]>([]);
   const [status, setStatus] = useState<DashboardStatus>("locked");
 
   const fetchOverview = useCallback(async (adminToken: string, quiet = false) => {
@@ -21,6 +24,7 @@ export default function AdminPage() {
       });
       if (response.status === 401 || response.status === 403) {
         setOverview(null);
+        setConnections([]);
         setStatus("error");
         return;
       }
@@ -29,11 +33,29 @@ export default function AdminPage() {
         throw new Error("overview_unavailable");
       }
 
-      setOverview((await response.json()) as AdminOverview);
+      const nextOverview = (await response.json()) as AdminOverview;
+      const connectionsResponse = await fetch("/api/admin/connections", {
+        cache: "no-store",
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+      if (connectionsResponse.status === 401 || connectionsResponse.status === 403) {
+        setOverview(null);
+        setConnections([]);
+        setStatus("error");
+        return;
+      }
+      if (!connectionsResponse.ok) {
+        if (quiet) return;
+        throw new Error("connections_unavailable");
+      }
+
+      setOverview(nextOverview);
+      setConnections((await connectionsResponse.json()) as ConnectionListItem[]);
       setStatus("ready");
     } catch {
       if (quiet) return;
       setOverview(null);
+      setConnections([]);
       setStatus("error");
     }
   }, []);
@@ -54,6 +76,7 @@ export default function AdminPage() {
     if (!nextToken) {
       setStatus("locked");
       setOverview(null);
+      setConnections([]);
       return;
     }
 
@@ -148,6 +171,49 @@ export default function AdminPage() {
             />
           </Panel>
         </div>
+
+        <Panel title="连接列表">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+              <thead className="border-b border-[#2f3432] text-xs text-[#9da39e]">
+                <tr>
+                  <th className="px-4 py-3 font-normal">connection</th>
+                  <th className="px-4 py-3 font-normal">state</th>
+                  <th className="px-4 py-3 font-normal">started</th>
+                  <th className="px-4 py-3 font-normal">closed</th>
+                  <th className="px-4 py-3 font-normal">signals</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#2a2f2c]">
+                {connections.map((connection) => (
+                  <tr key={connection.id}>
+                    <td className="px-4 py-3">
+                      <Link
+                        className="font-mono text-xs text-[#f0eee6] underline-offset-4 transition hover:text-[#d4ccb9] hover:underline"
+                        href={`/admin/connections/${connection.id}`}
+                      >
+                        {connection.id}
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3 text-[#f0eee6]">{connection.state}</td>
+                    <td className="px-4 py-3 text-[#9da39e]">{formatTimestamp(connection.startedAt)}</td>
+                    <td className="px-4 py-3 text-[#9da39e]">{connection.closedAt ? formatTimestamp(connection.closedAt) : "-"}</td>
+                    <td className="px-4 py-3 text-[#9da39e]">
+                      outbox {connection.outboxMessageCount} / reports {connection.reportCount} / echoes {connection.echoCount}
+                    </td>
+                  </tr>
+                ))}
+                {overview && connections.length === 0 ? (
+                  <tr>
+                    <td className="px-4 py-3 text-[#8f9691]" colSpan={5}>
+                      no connections
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
 
         <div className="grid gap-4 lg:grid-cols-2">
           <Panel title="服务健康">

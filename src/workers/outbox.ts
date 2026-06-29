@@ -1,6 +1,8 @@
 import { isProviderWindowExpired } from "../domain/provider-policy";
 import { prisma } from "../storage/prisma";
 
+const staleSendingAfterMs = 5 * 60_000;
+
 export type SendInput = {
   recipientUserId: string;
   body: string;
@@ -16,6 +18,8 @@ export type ProcessOutboxBatchInput = {
 
 export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
   const maxRetries = input.maxRetries ?? envInt("OUTBOX_MAX_RETRIES", 3);
+  await recoverStaleSendingMessages(input.now);
+
   const messages = await prisma.messageOutbox.findMany({
     where: {
       status: { in: ["pending", "retrying"] },
@@ -105,7 +109,10 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
         status: { in: ["pending", "retrying"] },
         nextAttemptAt: { lte: input.now },
       },
-      data: { status: "sending" },
+      data: {
+        status: "sending",
+        nextAttemptAt: input.now,
+      },
     });
     if (claimed.count === 0) return { kind: "skipped" };
 
@@ -154,6 +161,10 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
       where: { id: message.recipientUserId },
       data: { providerSendQuota: { decrement: 1 } },
     });
+    await tx.messageOutbox.update({
+      where: { id: message.id },
+      data: { providerWindowCheckedAt: input.now },
+    });
 
     return {
       kind: "send",
@@ -185,6 +196,7 @@ async function markSendFailure(input: {
         failedAt: exhausted ? input.now : null,
         bodyCiphertextOrBody: exhausted ? null : input.body,
         bodyClearedAt: exhausted ? input.now : null,
+        providerWindowCheckedAt: null,
       },
     }),
     prisma.user.update({
@@ -193,6 +205,51 @@ async function markSendFailure(input: {
     }),
   ]);
   return exhausted ? "failed" : "retried";
+}
+
+async function recoverStaleSendingMessages(now: Date) {
+  const staleBefore = new Date(now.getTime() - staleSendingAfterMs);
+  const staleMessages = await prisma.messageOutbox.findMany({
+    where: {
+      status: "sending",
+      nextAttemptAt: { lte: staleBefore },
+    },
+    select: {
+      id: true,
+    },
+    orderBy: [{ nextAttemptAt: "asc" }, { id: "asc" }],
+  });
+
+  for (const message of staleMessages) {
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "MessageOutbox" WHERE "id" = ${message.id} FOR UPDATE`;
+      const locked = await tx.messageOutbox.findUnique({
+        where: { id: message.id },
+        select: {
+          id: true,
+          recipientUserId: true,
+          status: true,
+          providerWindowCheckedAt: true,
+        },
+      });
+      if (!locked || locked.status !== "sending") return;
+
+      if (locked.providerWindowCheckedAt) {
+        await tx.user.update({
+          where: { id: locked.recipientUserId },
+          data: { providerSendQuota: { increment: 1 } },
+        });
+      }
+      await tx.messageOutbox.update({
+        where: { id: locked.id },
+        data: {
+          status: "retrying",
+          nextAttemptAt: now,
+          providerWindowCheckedAt: null,
+        },
+      });
+    });
+  }
 }
 
 async function markProviderWindowExpired(

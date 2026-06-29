@@ -268,7 +268,7 @@ describe("admin detail metrics", () => {
     const user = await createUser("health-user");
     await prisma.inboundDedupe.createMany({
       data: [
-        { providerMessageKey: "callback-processed", status: "processed", receivedAt: now, processedAt: now },
+        { providerMessageKey: "callback-processed", status: "processed", receivedAt: now, processedAt: now, duplicateCount: 2 },
         { providerMessageKey: "callback-duplicate", status: "duplicate", receivedAt: now, processedAt: now },
         { providerMessageKey: "callback-failed", status: "failed", receivedAt: now, processedAt: now },
       ],
@@ -321,7 +321,7 @@ describe("admin detail metrics", () => {
 
     expect(health).toMatchObject({
       callbacksTotal: 3,
-      callbackDuplicates: 1,
+      callbackDuplicates: 3,
       callbackFailed: 1,
       outbox: {
         total: 7,

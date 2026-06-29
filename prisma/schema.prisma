@@ -146,6 +146,7 @@ model InboundDedupe {
   receivedAt         DateTime  @default(now())
   processedAt        DateTime?
   status             String
+  duplicateCount     Int       @default(0)
 }
 
 model MessageOutbox {
