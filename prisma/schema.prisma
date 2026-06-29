@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserState {
+  new
+  available
+  waiting
+  matched
+  cooldown
+  paused
+  unreachable
+  blocked
+}
+
+enum ConnectionState {
+  active
+  ending
+  awaiting_echo
+  closed
+}
+
+enum CloseReason {
+  timeout
+  left
+  reported
+  provider_expired
+}
+
+enum OutboxStatus {
+  pending
+  retrying
+  sent
+  failed
+  provider_window_expired
+}
+
+enum ScheduledJobStatus {
+  pending
+  running
+  completed
+  failed
+}
+
+enum ScheduledJobType {
+  reminder_10
+  reminder_20
+  reminder_30
+  reminder_40
+  reminder_50
+  close_connection
+  reachability_renewal_prompt
+  cooldown_release
+  outbox_body_cleanup
+  metric_snapshot
+}
+
+enum PairBlockReason {
+  left
+  reported
+}
+
+model User {
+  id                String    @id @default(cuid())
+  providerUserHash  String    @unique
+  state             UserState @default(new)
+  matchingEnabled   Boolean   @default(true)
+  lastUserMessageAt DateTime?
+  reachableUntil    DateTime?
+  providerSendQuota Int       @default(999)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastSeenAt        DateTime?
+  blockedAt         DateTime?
+
+  sentConnections     Connection[]    @relation("ConnectionUserA")
+  receivedConnections Connection[]    @relation("ConnectionUserB")
+  outboxMessages      MessageOutbox[]
+  reportsMade         Report[]        @relation("Reporter")
+  reportsReceived     Report[]        @relation("Reported")
+  echoes              Echo[]
+
+  @@index([state, updatedAt])
+  @@index([matchingEnabled, reachableUntil, state])
+}
+
+model Connection {
+  id          String          @id @default(cuid())
+  userAId     String
+  userBId     String
+  state       ConnectionState @default(active)
+  startedAt   DateTime        @default(now())
+  endingAt    DateTime?
+  closedAt    DateTime?
+  closeReason CloseReason?
+
+  userA User @relation("ConnectionUserA", fields: [userAId], references: [id])
+  userB User @relation("ConnectionUserB", fields: [userBId], references: [id])
+
+  outboxMessages MessageOutbox[]
+  scheduledJobs  ScheduledJob[]
+  reports        Report[]
+  echoes         Echo[]
+
+  @@index([state, startedAt])
+  @@index([userAId, state])
+  @@index([userBId, state])
+}
+
+model PairBlock {
+  id         String          @id @default(cuid())
+  userLowId  String
+  userHighId String
+  reason     PairBlockReason
+  createdAt  DateTime        @default(now())
+
+  @@unique([userLowId, userHighId])
+  @@index([userLowId, userHighId])
+}
+
+model Report {
+  id             String   @id @default(cuid())
+  reporterUserId String
+  reportedUserId String
+  connectionId   String
+  reason         String
+  createdAt      DateTime @default(now())
+
+  reporter   User       @relation("Reporter", fields: [reporterUserId], references: [id])
+  reported   User       @relation("Reported", fields: [reportedUserId], references: [id])
+  connection Connection @relation(fields: [connectionId], references: [id])
+
+  @@unique([reporterUserId, reportedUserId])
+  @@index([reportedUserId, reporterUserId])
+  @@index([reportedUserId, createdAt])
+}
+
+model InboundDedupe {
+  id                 String    @id @default(cuid())
+  providerMessageKey String    @unique
+  receivedAt         DateTime  @default(now())
+  processedAt        DateTime?
+  status             String
+}
+
+model MessageOutbox {
+  id                      String       @id @default(cuid())
+  connectionId            String?
+  recipientUserId         String
+  idempotencyKey          String       @unique
+  bodyCiphertextOrBody    String?
+  bodyClearedAt           DateTime?
+  status                  OutboxStatus @default(pending)
+  retryCount              Int          @default(0)
+  nextAttemptAt           DateTime     @default(now())
+  createdAt               DateTime     @default(now())
+  sentAt                  DateTime?
+  failedAt                DateTime?
+  providerWindowCheckedAt DateTime?
+
+  connection Connection? @relation(fields: [connectionId], references: [id])
+  recipient  User        @relation(fields: [recipientUserId], references: [id])
+
+  @@index([status, nextAttemptAt])
+}
+
+model ScheduledJob {
+  id             String             @id @default(cuid())
+  connectionId   String?
+  userId         String?
+  type           ScheduledJobType
+  runAt          DateTime
+  idempotencyKey String             @unique
+  status         ScheduledJobStatus @default(pending)
+  attempts       Int                @default(0)
+  lockedAt       DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime           @default(now())
+
+  connection Connection? @relation(fields: [connectionId], references: [id])
+
+  @@index([status, runAt])
+}
+
+model Echo {
+  id           String   @id @default(cuid())
+  connectionId String
+  fromUserId   String
+  toUserId     String
+  body         String
+  createdAt    DateTime @default(now())
+
+  connection Connection @relation(fields: [connectionId], references: [id])
+  fromUser   User       @relation(fields: [fromUserId], references: [id])
+
+  @@unique([connectionId, fromUserId])
+}
+
+model RateLimitEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  eventType String
+  createdAt DateTime @default(now())
+}
+
+model AppError {
+  id          String    @id @default(cuid())
+  source      String
+  severity    String
+  fingerprint String
+  message     String
+  contextJson Json?
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+}
+
+model WorkerHeartbeat {
+  id           String   @id @default(cuid())
+  workerName   String   @unique
+  lastSeenAt   DateTime
+  status       String
+  metadataJson Json?
+}
+
+model MetricSnapshot {
+  id                         String   @id @default(cuid())
+  bucketStart                DateTime
+  bucketSize                 String
+  activeUsers                Int
+  waitingUsers               Int
+  activeConnections          Int
+  matchingEnabledUsers       Int
+  reachableUsers             Int
+  expiringReachabilityUsers  Int
+  completedConnections       Int
+  oneHourCompletionRate      Float
+  renewalPromptSentCount     Int
+  renewalPromptAnsweredCount Int
+  outboxPending              Int
+  providerWindowExpiredCount Int
+  scheduledJobLagSeconds     Int
+  reportCount                Int
+  blockedCount               Int
+  errorCount                 Int
+
+  @@index([bucketStart])
+}
