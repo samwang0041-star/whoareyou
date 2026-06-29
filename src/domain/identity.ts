@@ -40,24 +40,46 @@ export async function findOrCreateUserFromInbound(input: {
       },
     });
 
-    await tx.scheduledJob.upsert({
-      where: { idempotencyKey: `reachability-renewal:${user.id}` },
-      create: {
-        userId: user.id,
-        type: "reachability_renewal_prompt",
-        runAt: reachabilityRenewalRunAt(reachability.reachableUntil),
-        idempotencyKey: `reachability-renewal:${user.id}`,
-      },
-      update: {
-        runAt: reachabilityRenewalRunAt(reachability.reachableUntil),
-        status: "pending",
-        attempts: 0,
-        lockedAt: null,
-        completedAt: null,
-      },
+    await upsertReachabilityJob(tx, {
+      userId: user.id,
+      idempotencyKey: `reachability-renewal:${user.id}`,
+      runAt: reachabilityRenewalRunAt(reachability.reachableUntil),
+    });
+    await upsertReachabilityJob(tx, {
+      userId: user.id,
+      idempotencyKey: `reachability-expiry:${user.id}`,
+      runAt: reachability.reachableUntil,
     });
 
     return user;
+  });
+}
+
+type IdentityTransaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+async function upsertReachabilityJob(
+  tx: IdentityTransaction,
+  input: {
+    userId: string;
+    idempotencyKey: string;
+    runAt: Date;
+  },
+) {
+  await tx.scheduledJob.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    create: {
+      userId: input.userId,
+      type: "reachability_renewal_prompt",
+      runAt: input.runAt,
+      idempotencyKey: input.idempotencyKey,
+    },
+    update: {
+      runAt: input.runAt,
+      status: "pending",
+      attempts: 0,
+      lockedAt: null,
+      completedAt: null,
+    },
   });
 }
 

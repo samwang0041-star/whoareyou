@@ -23,13 +23,31 @@ describe("identity", () => {
     expect(user.reachableUntil?.toISOString()).toBe("2026-06-30T10:00:00.000Z");
     expect(user.matchingEnabled).toBe(true);
     expect(user.state).toBe("available");
-    await expect(prisma.scheduledJob.findFirstOrThrow()).resolves.toMatchObject({
-      userId: user.id,
-      type: "reachability_renewal_prompt",
-      runAt: new Date("2026-06-30T09:00:00.000Z"),
-      idempotencyKey: `reachability-renewal:${user.id}`,
-      status: "pending",
-    });
+    const jobs = await prisma.scheduledJob.findMany({ orderBy: { idempotencyKey: "asc" } });
+    expect(
+      jobs.map((job) => ({
+        userId: job.userId,
+        type: job.type,
+        runAt: job.runAt,
+        idempotencyKey: job.idempotencyKey,
+        status: job.status,
+      })),
+    ).toEqual([
+      {
+        userId: user.id,
+        type: "reachability_renewal_prompt",
+        runAt: new Date("2026-06-30T10:00:00.000Z"),
+        idempotencyKey: `reachability-expiry:${user.id}`,
+        status: "pending",
+      },
+      {
+        userId: user.id,
+        type: "reachability_renewal_prompt",
+        runAt: new Date("2026-06-30T09:00:00.000Z"),
+        idempotencyKey: `reachability-renewal:${user.id}`,
+        status: "pending",
+      },
+    ]);
   });
 
   it("refreshes the renewal prompt when the user speaks again", async () => {
@@ -39,8 +57,8 @@ describe("identity", () => {
       replyWindowHours: 24,
       sendQuota: 999,
     });
-    await prisma.scheduledJob.update({
-      where: { idempotencyKey: `reachability-renewal:${firstUser.id}` },
+    await prisma.scheduledJob.updateMany({
+      where: { userId: firstUser.id },
       data: {
         status: "completed",
         completedAt: new Date("2026-06-30T09:00:00.000Z"),
@@ -55,13 +73,23 @@ describe("identity", () => {
       sendQuota: 999,
     });
 
-    await expect(prisma.scheduledJob.findMany()).resolves.toHaveLength(1);
+    await expect(prisma.scheduledJob.findMany()).resolves.toHaveLength(2);
     await expect(
       prisma.scheduledJob.findUniqueOrThrow({
         where: { idempotencyKey: `reachability-renewal:${firstUser.id}` },
       }),
     ).resolves.toMatchObject({
       runAt: new Date("2026-06-30T11:00:00.000Z"),
+      status: "pending",
+      attempts: 0,
+      completedAt: null,
+    });
+    await expect(
+      prisma.scheduledJob.findUniqueOrThrow({
+        where: { idempotencyKey: `reachability-expiry:${firstUser.id}` },
+      }),
+    ).resolves.toMatchObject({
+      runAt: new Date("2026-06-30T12:00:00.000Z"),
       status: "pending",
       attempts: 0,
       completedAt: null,
