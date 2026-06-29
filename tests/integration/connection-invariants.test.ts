@@ -152,8 +152,13 @@ describe("connection invariants", () => {
       `;
     }
 
-    await expect(
-      prisma.$executeRaw`SELECT "validate_single_active_connection_per_user"()`,
-    ).rejects.toThrow(/active-state connection/);
+    try {
+      await expect(
+        prisma.$executeRaw`SELECT "validate_single_active_connection_per_user"()`,
+      ).rejects.toThrow(/active-state connection/);
+    } finally {
+      await prisma.connection.deleteMany();
+      await prisma.user.deleteMany();
+    }
   });
 });
