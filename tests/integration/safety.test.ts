@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { closeForLeave, reportConnection, submitEcho } from "../../src/domain/safety";
 import { prisma } from "../../src/storage/prisma";
@@ -31,6 +32,19 @@ async function createActiveConnection(userAId: string, userBId: string) {
       userBId,
       state: "active",
       startedAt: now,
+    },
+  });
+}
+
+async function createClosedConnection(userAId: string, userBId: string) {
+  return prisma.connection.create({
+    data: {
+      userAId,
+      userBId,
+      state: "closed",
+      closeReason: "timeout",
+      startedAt: now,
+      closedAt: now,
     },
   });
 }
@@ -100,6 +114,61 @@ describe("safety actions", () => {
     ]);
   });
 
+  it("does not reactivate a closed connection when a user leaves late", async () => {
+    const leavingUser = await prisma.user.create({
+      data: { providerUserHash: "safety-late-leave-actor", state: "available", matchingEnabled: true },
+    });
+    const otherUser = await prisma.user.create({
+      data: { providerUserHash: "safety-late-leave-other", state: "available", matchingEnabled: true },
+    });
+    const connection = await createClosedConnection(leavingUser.id, otherUser.id);
+
+    await closeForLeave({
+      connectionId: connection.id,
+      actorUserId: leavingUser.id,
+      now: new Date(now.getTime() + 1),
+    });
+
+    await expect(prisma.connection.findUniqueOrThrow({ where: { id: connection.id } })).resolves.toMatchObject({
+      state: "closed",
+      closeReason: "timeout",
+      closedAt: now,
+    });
+    const users = await prisma.user.findMany({
+      where: { id: { in: [leavingUser.id, otherUser.id] } },
+      orderBy: { providerUserHash: "asc" },
+      select: { state: true, matchingEnabled: true },
+    });
+    expect(users).toEqual([
+      { state: "available", matchingEnabled: true },
+      { state: "available", matchingEnabled: true },
+    ]);
+  });
+
+  it("does not reactivate a closed connection when a user reports late", async () => {
+    const reporter = await prisma.user.create({
+      data: { providerUserHash: "safety-late-report-reporter", state: "available", matchingEnabled: true },
+    });
+    const reported = await prisma.user.create({
+      data: { providerUserHash: "safety-late-report-reported", state: "available", matchingEnabled: true },
+    });
+    const connection = await createClosedConnection(reporter.id, reported.id);
+
+    await reportConnection({
+      connectionId: connection.id,
+      reporterUserId: reporter.id,
+      reason: "user_requested",
+      now: new Date(now.getTime() + 1),
+    });
+
+    await expect(prisma.connection.findUniqueOrThrow({ where: { id: connection.id } })).resolves.toMatchObject({
+      state: "closed",
+      closeReason: "timeout",
+      closedAt: now,
+    });
+    await expect(prisma.report.count({ where: { reportedUserId: reported.id } })).resolves.toBe(1);
+  });
+
   it("blocks a user after three distinct reporters", async () => {
     const reportedUser = await createMatchedUser("safety-reported");
     const reporters = await Promise.all([
@@ -143,6 +212,59 @@ describe("safety actions", () => {
     });
   });
 
+  it("blocks a user when concurrent reports cross the threshold", async () => {
+    const reportedUser = await prisma.user.create({
+      data: { providerUserHash: "safety-concurrent-reported", state: "available", matchingEnabled: true },
+    });
+    const priorReporter = await prisma.user.create({ data: { providerUserHash: "safety-concurrent-prior" } });
+    const priorConnection = await createClosedConnection(priorReporter.id, reportedUser.id);
+    await prisma.report.create({
+      data: {
+        reporterUserId: priorReporter.id,
+        reportedUserId: reportedUser.id,
+        connectionId: priorConnection.id,
+        reason: "user_requested",
+        createdAt: now,
+      },
+    });
+
+    const reporterA = await prisma.user.create({ data: { providerUserHash: "safety-concurrent-a" } });
+    const reporterB = await prisma.user.create({ data: { providerUserHash: "safety-concurrent-b" } });
+    const connectionA = await createClosedConnection(reporterA.id, reportedUser.id);
+    const connectionB = await createClosedConnection(reporterB.id, reportedUser.id);
+
+    const results = await Promise.allSettled([
+      reportConnection({
+        connectionId: connectionA.id,
+        reporterUserId: reporterA.id,
+        reason: "user_requested",
+        now: new Date(now.getTime() + 1),
+      }),
+      reportConnection({
+        connectionId: connectionB.id,
+        reporterUserId: reporterB.id,
+        reason: "user_requested",
+        now: new Date(now.getTime() + 2),
+      }),
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ status: "fulfilled" }),
+      expect.objectContaining({ status: "fulfilled" }),
+    ]);
+    await expect(prisma.report.count({ where: { reportedUserId: reportedUser.id } })).resolves.toBe(3);
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: reportedUser.id },
+        select: { state: true, matchingEnabled: true, blockedAt: true },
+      }),
+    ).resolves.toMatchObject({
+      state: "blocked",
+      matchingEnabled: false,
+      blockedAt: expect.any(Date),
+    });
+  });
+
   it("allows one echo per user and rejects a second echo from the same user", async () => {
     const fromUser = await createMatchedUser("safety-echo-from");
     const toUser = await createMatchedUser("safety-echo-to");
@@ -167,10 +289,14 @@ describe("safety actions", () => {
       connectionId: connection.id,
       fromUserId: fromUser.id,
       toUserId: toUser.id,
-      body: expect.stringMatching(/^sha256:[a-f0-9]{64}:length:28$/),
+      body: "[redacted]",
     });
+    const bodyDigest = createHash("sha256").update("Thanks for the conversation.").digest("hex");
     await expect(prisma.echo.findFirstOrThrow()).resolves.toMatchObject({
       body: expect.not.stringContaining("Thanks for the conversation."),
+    });
+    await expect(prisma.echo.findFirstOrThrow()).resolves.toMatchObject({
+      body: expect.not.stringContaining(bodyDigest),
     });
 
     await expect(

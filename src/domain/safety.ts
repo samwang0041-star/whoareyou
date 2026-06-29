@@ -1,6 +1,11 @@
-import { createHash } from "crypto";
 import { Prisma } from "@prisma/client";
+import type { ConnectionState } from "@prisma/client";
 import { prisma } from "../storage/prisma";
+
+const closeableConnectionStates: ConnectionState[] = ["active", "ending"];
+const maxSafetyAttempts = 3;
+const retryablePrismaCodes = new Set(["P2034"]);
+const retryableDatabaseCodes = new Set(["40001", "40P01"]);
 
 export type CloseForLeaveInput = {
   connectionId: string;
@@ -32,15 +37,20 @@ export async function closeForLeave(input: CloseForLeaveInput) {
     if (!isConnectionUser(connection, input.actorUserId)) throw new Error("user_not_in_connection");
 
     await upsertPairBlock(tx, connection.userAId, connection.userBId, "left");
-    const closedConnection = await tx.connection.update({
-      where: { id: connection.id },
-      data: {
-        state: "awaiting_echo",
-        closeReason: "left",
-        closedAt: now,
-      },
-    });
-    await moveNonBlockedUsersToCooldown(tx, [connection.userAId, connection.userBId]);
+    const closedConnection = isCloseableConnectionState(connection.state)
+      ? await tx.connection.update({
+          where: { id: connection.id },
+          data: {
+            state: "awaiting_echo",
+            closeReason: "left",
+            closedAt: now,
+          },
+        })
+      : connection;
+
+    if (isCloseableConnectionState(connection.state)) {
+      await moveNonBlockedUsersToCooldown(tx, [connection.userAId, connection.userBId]);
+    }
 
     return closedConnection;
   });
@@ -49,57 +59,76 @@ export async function closeForLeave(input: CloseForLeaveInput) {
 export async function reportConnection(input: ReportConnectionInput) {
   const now = input.now ?? new Date();
 
-  return prisma.$transaction(async (tx) => {
-    const connection = await findConnectionOrThrow(tx, input.connectionId);
-    if (!isConnectionUser(connection, input.reporterUserId)) throw new Error("user_not_in_connection");
+  for (let attempt = 1; attempt <= maxSafetyAttempts; attempt += 1) {
+    try {
+      return await reportConnectionOnce(input, now);
+    } catch (error) {
+      if (!isRetryableSafetyRace(error) || attempt === maxSafetyAttempts) throw error;
+    }
+  }
 
-    const reportedUserId = otherUserId(connection, input.reporterUserId);
+  throw new Error("report_retry_exhausted");
+}
 
-    await tx.report.upsert({
-      where: {
-        reporterUserId_reportedUserId: {
+async function reportConnectionOnce(input: ReportConnectionInput, now: Date) {
+  return prisma.$transaction(
+    async (tx) => {
+      const connection = await findConnectionOrThrow(tx, input.connectionId);
+      if (!isConnectionUser(connection, input.reporterUserId)) throw new Error("user_not_in_connection");
+
+      const reportedUserId = otherUserId(connection, input.reporterUserId);
+
+      await tx.report.upsert({
+        where: {
+          reporterUserId_reportedUserId: {
+            reporterUserId: input.reporterUserId,
+            reportedUserId,
+          },
+        },
+        create: {
           reporterUserId: input.reporterUserId,
           reportedUserId,
+          connectionId: connection.id,
+          reason: input.reason,
+          createdAt: now,
         },
-      },
-      create: {
-        reporterUserId: input.reporterUserId,
-        reportedUserId,
-        connectionId: connection.id,
-        reason: input.reason,
-        createdAt: now,
-      },
-      update: {
-        connectionId: connection.id,
-        reason: input.reason,
-      },
-    });
-    await upsertPairBlock(tx, connection.userAId, connection.userBId, "reported");
-    const closedConnection = await tx.connection.update({
-      where: { id: connection.id },
-      data: {
-        state: "awaiting_echo",
-        closeReason: "reported",
-        closedAt: now,
-      },
-    });
-
-    const reportCount = await tx.report.count({ where: { reportedUserId } });
-    if (reportCount >= 3) {
-      await tx.user.update({
-        where: { id: reportedUserId },
-        data: {
-          state: "blocked",
-          matchingEnabled: false,
-          blockedAt: now,
+        update: {
+          connectionId: connection.id,
+          reason: input.reason,
         },
       });
-    }
+      await upsertPairBlock(tx, connection.userAId, connection.userBId, "reported");
+      const closedConnection = isCloseableConnectionState(connection.state)
+        ? await tx.connection.update({
+            where: { id: connection.id },
+            data: {
+              state: "awaiting_echo",
+              closeReason: "reported",
+              closedAt: now,
+            },
+          })
+        : connection;
 
-    await moveNonBlockedUsersToCooldown(tx, [connection.userAId, connection.userBId]);
+      const reportCount = await tx.report.count({ where: { reportedUserId } });
+      if (reportCount >= 3) {
+        await tx.user.update({
+          where: { id: reportedUserId },
+          data: {
+            state: "blocked",
+            matchingEnabled: false,
+            blockedAt: now,
+          },
+        });
+      }
 
-    return closedConnection;
-  });
+      if (isCloseableConnectionState(connection.state)) {
+        await moveNonBlockedUsersToCooldown(tx, [connection.userAId, connection.userBId]);
+      }
+
+      return closedConnection;
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
 }
 
 export async function submitEcho(input: SubmitEchoInput) {
@@ -130,7 +159,7 @@ export async function submitEcho(input: SubmitEchoInput) {
           connectionId: connection.id,
           fromUserId: input.fromUserId,
           toUserId: otherUserId(connection, input.fromUserId),
-          body: storedEchoBody(input.body),
+          body: storedEchoBody(),
           createdAt: now,
         },
       });
@@ -139,6 +168,10 @@ export async function submitEcho(input: SubmitEchoInput) {
     if (isUniqueEchoError(error)) throw new Error("echo_already_submitted");
     throw error;
   }
+}
+
+function isCloseableConnectionState(state: ConnectionState): boolean {
+  return closeableConnectionStates.includes(state);
 }
 
 async function findConnectionOrThrow(tx: SafetyTransaction, connectionId: string) {
@@ -196,9 +229,36 @@ async function moveNonBlockedUsersToCooldown(tx: SafetyTransaction, userIds: str
   });
 }
 
-function storedEchoBody(body: string): string {
-  const digest = createHash("sha256").update(body).digest("hex");
-  return `sha256:${digest}:length:${body.length}`;
+function storedEchoBody(): string {
+  return "[redacted]";
+}
+
+function isRetryableSafetyRace(error: unknown): boolean {
+  const code = getErrorCode(error);
+  if (code && retryablePrismaCodes.has(code)) return true;
+
+  const meta = getErrorMeta(error);
+  return hasRetryableDatabaseCode(meta);
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) return error.code;
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function getErrorMeta(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("meta" in error)) return undefined;
+  return (error as { meta?: unknown }).meta;
+}
+
+function hasRetryableDatabaseCode(value: unknown): boolean {
+  if (typeof value === "string") return retryableDatabaseCodes.has(value);
+  if (typeof value !== "object" || value === null) return false;
+
+  return Object.values(value).some((nestedValue) => hasRetryableDatabaseCode(nestedValue));
 }
 
 function isUniqueEchoError(error: unknown): boolean {
