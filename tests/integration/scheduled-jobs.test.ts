@@ -121,6 +121,81 @@ describe("scheduled jobs", () => {
     });
   });
 
+  it("does not overwrite a connection already closed by leave or report", async () => {
+    const { connection } = await createConnection();
+    const leftAt = new Date(now.getTime() - 1_000);
+    await prisma.connection.update({
+      where: { id: connection.id },
+      data: {
+        state: "awaiting_echo",
+        closeReason: "left",
+        closedAt: leftAt,
+      },
+    });
+    await prisma.scheduledJob.createMany({
+      data: [
+        {
+          connectionId: connection.id,
+          type: "reminder_50",
+          runAt: now,
+          idempotencyKey: "scheduled-stale-reminder",
+        },
+        {
+          connectionId: connection.id,
+          type: "close_connection",
+          runAt: now,
+          idempotencyKey: "scheduled-stale-close",
+        },
+      ],
+    });
+
+    await processScheduledJobs({ now, limit: 10, cooldownSeconds: 60 });
+
+    await expect(prisma.connection.findUniqueOrThrow({ where: { id: connection.id } })).resolves.toMatchObject({
+      state: "awaiting_echo",
+      closeReason: "left",
+      closedAt: leftAt,
+    });
+    await expect(prisma.messageOutbox.count()).resolves.toBe(0);
+    await expect(prisma.scheduledJob.count({ where: { status: "completed" } })).resolves.toBe(2);
+  });
+
+  it("recovers a stale running job", async () => {
+    const user = await prisma.user.create({
+      data: {
+        providerUserHash: "scheduled-stale-running-user",
+        state: "cooldown",
+        matchingEnabled: true,
+        reachableUntil,
+      },
+    });
+    await prisma.scheduledJob.create({
+      data: {
+        userId: user.id,
+        type: "cooldown_release",
+        runAt: now,
+        idempotencyKey: "scheduled-stale-running",
+        status: "running",
+        lockedAt: new Date(now.getTime() - 120_000),
+        attempts: 1,
+      },
+    });
+
+    await processScheduledJobs({ now, limit: 10, cooldownSeconds: 60 });
+
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { state: true, matchingEnabled: true },
+      }),
+    ).resolves.toEqual({ state: "available", matchingEnabled: true });
+    await expect(prisma.scheduledJob.findFirstOrThrow()).resolves.toMatchObject({
+      status: "completed",
+      attempts: 2,
+      completedAt: now,
+    });
+  });
+
   it("releases cooldown users when reachable and marks expired users unreachable", async () => {
     const reachableUser = await prisma.user.create({
       data: {

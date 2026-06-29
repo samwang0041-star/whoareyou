@@ -8,6 +8,7 @@ type ProcessScheduledJobsInput = {
   limit: number;
   cooldownSeconds: number;
   bodyTtlSeconds?: number;
+  maxAttempts?: number;
 };
 
 type ScheduledJobTransaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
@@ -17,12 +18,17 @@ type ReminderJobType = Extract<ScheduledJobType, "reminder_10" | "reminder_20" |
 const activeReminderStates: ConnectionState[] = ["active", "ending"];
 
 export async function processScheduledJobs(input: ProcessScheduledJobsInput) {
+  const maxAttempts = input.maxAttempts ?? envInt("SCHEDULED_JOB_MAX_ATTEMPTS", 3);
+  const staleLockedBefore = addSeconds(input.now, -60);
   const jobs = await prisma.scheduledJob.findMany({
     where: {
-      status: "pending",
+      OR: [
+        { status: "pending" },
+        { status: "running", lockedAt: { lte: staleLockedBefore } },
+      ],
       runAt: { lte: input.now },
     },
-    include: { connection: true },
+    select: { id: true },
     orderBy: [{ runAt: "asc" }, { id: "asc" }],
     take: input.limit,
   });
@@ -31,7 +37,14 @@ export async function processScheduledJobs(input: ProcessScheduledJobsInput) {
 
   for (const job of jobs) {
     const claimed = await prisma.scheduledJob.updateMany({
-      where: { id: job.id, status: "pending" },
+      where: {
+        id: job.id,
+        runAt: { lte: input.now },
+        OR: [
+          { status: "pending" },
+          { status: "running", lockedAt: { lte: staleLockedBefore } },
+        ],
+      },
       data: {
         status: "running",
         lockedAt: input.now,
@@ -43,15 +56,21 @@ export async function processScheduledJobs(input: ProcessScheduledJobsInput) {
     result.processed += 1;
     try {
       await prisma.$transaction(async (tx) => {
-        if (isReminderJob(job.type)) {
-          await processReminderJob(tx, job, job.type, input.now);
-        } else if (job.type === "close_connection") {
-          await processCloseConnectionJob(tx, job, input.now, input.cooldownSeconds);
-        } else if (job.type === "cooldown_release") {
-          await processCooldownReleaseJob(tx, job.userId, input.now);
-        } else if (job.type === "reachability_renewal_prompt") {
-          await processReachabilityRenewalJob(tx, job.idempotencyKey, job.userId, input.now);
-        } else if (job.type === "outbox_body_cleanup") {
+        const freshJob = await tx.scheduledJob.findUnique({
+          where: { id: job.id },
+          include: { connection: true },
+        });
+        if (!freshJob) return;
+
+        if (isReminderJob(freshJob.type)) {
+          await processReminderJob(tx, freshJob, freshJob.type, input.now);
+        } else if (freshJob.type === "close_connection") {
+          await processCloseConnectionJob(tx, freshJob, input.now, input.cooldownSeconds);
+        } else if (freshJob.type === "cooldown_release") {
+          await processCooldownReleaseJob(tx, freshJob.userId, input.now);
+        } else if (freshJob.type === "reachability_renewal_prompt") {
+          await processReachabilityRenewalJob(tx, freshJob.idempotencyKey, freshJob.userId, input.now);
+        } else if (freshJob.type === "outbox_body_cleanup") {
           await processOutboxBodyCleanupJob(tx, input.now, input.bodyTtlSeconds ?? envInt("OUTBOX_BODY_TTL_SECONDS", 900));
         }
 
@@ -64,13 +83,22 @@ export async function processScheduledJobs(input: ProcessScheduledJobsInput) {
         });
       });
       result.completed += 1;
-    } catch (error) {
+    } catch {
+      const currentJob = await prisma.scheduledJob.findUnique({
+        where: { id: job.id },
+        select: { attempts: true },
+      });
+      const attempts = currentJob?.attempts ?? maxAttempts;
+      const exhausted = attempts >= maxAttempts;
       await prisma.scheduledJob.update({
         where: { id: job.id },
-        data: { status: "failed" },
+        data: {
+          status: exhausted ? "failed" : "pending",
+          runAt: exhausted ? undefined : addSeconds(input.now, attempts * 30),
+          lockedAt: null,
+        },
       });
       result.failed += 1;
-      throw error;
     }
   }
 
@@ -90,6 +118,10 @@ async function processReminderJob(
   const connection = job.connection;
   if (!connection || !activeReminderStates.includes(connection.state)) return;
 
+  await tx.$queryRaw`SELECT "id" FROM "Connection" WHERE "id" = ${connection.id} FOR UPDATE`;
+  const freshConnection = await tx.connection.findUnique({ where: { id: connection.id } });
+  if (!freshConnection || !activeReminderStates.includes(freshConnection.state)) return;
+
   if (type === "reminder_50") {
     await tx.connection.updateMany({
       where: { id: connection.id, state: "active" },
@@ -101,8 +133,8 @@ async function processReminderJob(
   }
 
   await tx.messageOutbox.createMany({
-    data: [connection.userAId, connection.userBId].map((recipientUserId) => ({
-      connectionId: connection.id,
+    data: [freshConnection.userAId, freshConnection.userBId].map((recipientUserId) => ({
+      connectionId: freshConnection.id,
       recipientUserId,
       idempotencyKey: `${job.idempotencyKey}:reminder:${recipientUserId}`,
       bodyCiphertextOrBody: reminderBody(type),
@@ -121,8 +153,12 @@ async function processCloseConnectionJob(
   const connection = job.connection;
   if (!connection || !activeReminderStates.includes(connection.state)) return;
 
-  await tx.connection.update({
-    where: { id: connection.id },
+  await tx.$queryRaw`SELECT "id" FROM "Connection" WHERE "id" = ${connection.id} FOR UPDATE`;
+  const freshConnection = await tx.connection.findUnique({ where: { id: connection.id } });
+  if (!freshConnection || !activeReminderStates.includes(freshConnection.state)) return;
+
+  await tx.connection.updateMany({
+    where: { id: freshConnection.id, state: { in: activeReminderStates } },
     data: {
       state: "awaiting_echo",
       closeReason: "timeout",
@@ -131,7 +167,7 @@ async function processCloseConnectionJob(
   });
   await tx.user.updateMany({
     where: {
-      id: { in: [connection.userAId, connection.userBId] },
+      id: { in: [freshConnection.userAId, freshConnection.userBId] },
       state: { not: "blocked" },
     },
     data: {
@@ -140,8 +176,8 @@ async function processCloseConnectionJob(
     },
   });
   await tx.messageOutbox.createMany({
-    data: [connection.userAId, connection.userBId].map((recipientUserId) => ({
-      connectionId: connection.id,
+    data: [freshConnection.userAId, freshConnection.userBId].map((recipientUserId) => ({
+      connectionId: freshConnection.id,
       recipientUserId,
       idempotencyKey: `${job.idempotencyKey}:ended:${recipientUserId}`,
       bodyCiphertextOrBody: voice.ended(),
@@ -150,7 +186,7 @@ async function processCloseConnectionJob(
     skipDuplicates: true,
   });
   await tx.scheduledJob.createMany({
-    data: [connection.userAId, connection.userBId].map((userId) => ({
+    data: [freshConnection.userAId, freshConnection.userBId].map((userId) => ({
       userId,
       type: "cooldown_release",
       runAt: addSeconds(now, cooldownSeconds),

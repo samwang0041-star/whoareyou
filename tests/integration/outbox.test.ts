@@ -128,6 +128,8 @@ describe("outbox", () => {
     await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
       status: "provider_window_expired",
       providerWindowCheckedAt: now,
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
     });
     await expect(
       prisma.user.findUniqueOrThrow({
@@ -159,6 +161,8 @@ describe("outbox", () => {
     await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
       status: "provider_window_expired",
       providerWindowCheckedAt: now,
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
     });
     await expect(
       prisma.user.findUniqueOrThrow({
@@ -209,7 +213,8 @@ describe("outbox", () => {
       status: "failed",
       retryCount: 2,
       failedAt: retryAt,
-      bodyCiphertextOrBody: "retry me",
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: retryAt,
     });
   });
 
@@ -247,6 +252,96 @@ describe("outbox", () => {
       status: "sent",
       bodyCiphertextOrBody: null,
       bodyClearedAt: now,
+    });
+  });
+
+  it("does not oversend when one recipient has multiple due messages and one quota", async () => {
+    const user = await createReachableUser("outbox-quota-batch-recipient", 1);
+    await prisma.messageOutbox.createMany({
+      data: [
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "outbox-quota-batch-1",
+          bodyCiphertextOrBody: "first",
+          nextAttemptAt: now,
+        },
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "outbox-quota-batch-2",
+          bodyCiphertextOrBody: "second",
+          nextAttemptAt: now,
+        },
+      ],
+    });
+
+    const sent: string[] = [];
+    await processOutboxBatch({
+      now,
+      limit: 10,
+      send: async (message) => {
+        sent.push(message.idempotencyKey);
+      },
+    });
+
+    expect(sent).toHaveLength(1);
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: { providerSendQuota: true },
+      }),
+    ).resolves.toEqual({ providerSendQuota: 0 });
+    const messages = await prisma.messageOutbox.findMany({ orderBy: { idempotencyKey: "asc" } });
+    expect(messages.map((message) => message.status)).toEqual(["sent", "provider_window_expired"]);
+    expect(messages.map((message) => message.bodyCiphertextOrBody)).toEqual([null, null]);
+  });
+
+  it("keeps a long in-flight send from being reclaimed by a later batch", async () => {
+    const user = await createReachableUser("outbox-long-send-recipient");
+    await prisma.messageOutbox.create({
+      data: {
+        recipientUserId: user.id,
+        idempotencyKey: "outbox-long-send-message",
+        bodyCiphertextOrBody: "send once slowly",
+        nextAttemptAt: now,
+      },
+    });
+
+    let releaseSend!: () => void;
+    const sent: string[] = [];
+    const pendingBatches: Promise<unknown>[] = [];
+    const sendStarted = new Promise<void>((resolve) => {
+      const firstBatch = processOutboxBatch({
+        now,
+        limit: 10,
+        send: async (message) => {
+          sent.push(message.idempotencyKey);
+          resolve();
+          await new Promise<void>((release) => {
+            releaseSend = release;
+          });
+        },
+      });
+      pendingBatches.push(firstBatch);
+    });
+
+    await sendStarted;
+    pendingBatches.push(
+      processOutboxBatch({
+        now: new Date(now.getTime() + 31_000),
+        limit: 10,
+        send: async (message) => {
+          sent.push(`duplicate:${message.idempotencyKey}`);
+        },
+      }),
+    );
+
+    releaseSend();
+    await Promise.all(pendingBatches);
+
+    expect(sent).toEqual(["outbox-long-send-message"]);
+    await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
+      status: "sent",
+      bodyCiphertextOrBody: null,
     });
   });
 });

@@ -21,7 +21,7 @@ export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
       status: { in: ["pending", "retrying"] },
       nextAttemptAt: { lte: input.now },
     },
-    include: { recipient: true },
+    select: { id: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: input.limit,
   });
@@ -29,61 +29,99 @@ export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
   const result = { processed: 0, sent: 0, retried: 0, failed: 0, providerWindowExpired: 0 };
 
   for (const message of messages) {
-    const claimed = await prisma.messageOutbox.updateMany({
-      where: {
-        id: message.id,
-        status: { in: ["pending", "retrying"] },
-        nextAttemptAt: { lte: input.now },
-      },
-      data: {
-        status: "retrying",
-        nextAttemptAt: addSeconds(input.now, 30),
-      },
+    const outcome = await processOneOutboxMessage({
+      messageId: message.id,
+      now: input.now,
+      maxRetries,
+      send: input.send,
     });
-    if (claimed.count === 0) continue;
+    if (outcome === "skipped") continue;
 
     result.processed += 1;
+    if (outcome === "sent") result.sent += 1;
+    if (outcome === "retried") result.retried += 1;
+    if (outcome === "failed") result.failed += 1;
+    if (outcome === "provider_window_expired") result.providerWindowExpired += 1;
+  }
 
-    if (isProviderWindowExpired(input.now, message.recipient.reachableUntil) || message.recipient.providerSendQuota <= 0) {
-      await markProviderWindowExpired(message.id, message.recipientUserId, input.now);
-      result.providerWindowExpired += 1;
-      continue;
-    }
+  return result;
+}
 
-    const body = message.bodyCiphertextOrBody;
-    if (!body) {
-      await prisma.messageOutbox.update({
-        where: { id: message.id },
-        data: { status: "failed", failedAt: input.now },
+type ProcessOneOutboxMessageInput = {
+  messageId: string;
+  now: Date;
+  maxRetries: number;
+  send: (message: SendInput) => Promise<void>;
+};
+
+type OutboxOutcome = "skipped" | "sent" | "retried" | "failed" | "provider_window_expired";
+
+async function processOneOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<OutboxOutcome> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT 1::int AS locked FROM pg_advisory_xact_lock(hashtextextended(${input.messageId}, 7101))`;
+
+      const message = await tx.messageOutbox.findUnique({
+        where: { id: input.messageId },
+        include: { recipient: true },
       });
-      result.failed += 1;
-      continue;
-    }
+      if (!message) return "skipped";
+      if (!["pending", "retrying"].includes(message.status)) return "skipped";
+      if (message.nextAttemptAt > input.now) return "skipped";
 
-    try {
-      await input.send({
-        recipientUserId: message.recipientUserId,
-        body,
-        idempotencyKey: message.idempotencyKey,
-      });
-    } catch {
-      const retryCount = message.retryCount + 1;
-      const exhausted = retryCount >= maxRetries;
-      await prisma.messageOutbox.update({
-        where: { id: message.id },
-        data: {
-          status: exhausted ? "failed" : "retrying",
-          retryCount,
-          nextAttemptAt: exhausted ? input.now : addSeconds(input.now, retryCount * 30),
-          failedAt: exhausted ? input.now : null,
+      await tx.$queryRaw`SELECT 1::int AS locked FROM pg_advisory_xact_lock(hashtextextended(${message.recipientUserId}, 7102))`;
+
+      const recipient = await tx.user.findUnique({
+        where: { id: message.recipientUserId },
+        select: {
+          id: true,
+          state: true,
+          reachableUntil: true,
+          providerSendQuota: true,
         },
       });
-      if (exhausted) result.failed += 1;
-      else result.retried += 1;
-      continue;
-    }
+      if (!recipient || isProviderWindowExpired(input.now, recipient.reachableUntil) || recipient.providerSendQuota <= 0) {
+        await markProviderWindowExpired(tx, message.id, message.recipientUserId, input.now);
+        return "provider_window_expired";
+      }
 
-    await prisma.$transaction(async (tx) => {
+      const body = message.bodyCiphertextOrBody;
+      if (!body) {
+        await tx.messageOutbox.update({
+          where: { id: message.id },
+          data: {
+            status: "failed",
+            failedAt: input.now,
+            bodyCiphertextOrBody: null,
+            bodyClearedAt: input.now,
+          },
+        });
+        return "failed";
+      }
+
+      try {
+        await input.send({
+          recipientUserId: message.recipientUserId,
+          body,
+          idempotencyKey: message.idempotencyKey,
+        });
+      } catch {
+        const retryCount = message.retryCount + 1;
+        const exhausted = retryCount >= input.maxRetries;
+        await tx.messageOutbox.update({
+          where: { id: message.id },
+          data: {
+            status: exhausted ? "failed" : "retrying",
+            retryCount,
+            nextAttemptAt: exhausted ? input.now : addSeconds(input.now, retryCount * 30),
+            failedAt: exhausted ? input.now : null,
+            bodyCiphertextOrBody: exhausted ? null : body,
+            bodyClearedAt: exhausted ? input.now : null,
+          },
+        });
+        return exhausted ? "failed" : "retried";
+      }
+
       await tx.messageOutbox.update({
         where: { id: message.id },
         data: {
@@ -98,32 +136,38 @@ export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
         where: { id: message.recipientUserId },
         data: { providerSendQuota: { decrement: 1 } },
       });
-    });
-    result.sent += 1;
-  }
-
-  return result;
+      return "sent";
+    },
+    { maxWait: 10_000, timeout: 120_000 },
+  );
 }
 
-async function markProviderWindowExpired(messageId: string, recipientUserId: string, now: Date) {
-  await prisma.$transaction(async (tx) => {
-    await tx.messageOutbox.update({
-      where: { id: messageId },
-      data: {
-        status: "provider_window_expired",
-        providerWindowCheckedAt: now,
-      },
-    });
-    await tx.user.updateMany({
-      where: {
-        id: recipientUserId,
-        state: { not: "blocked" },
-      },
-      data: {
-        state: "unreachable",
-        matchingEnabled: false,
-      },
-    });
+type OutboxTransaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+async function markProviderWindowExpired(
+  tx: OutboxTransaction,
+  messageId: string,
+  recipientUserId: string,
+  now: Date,
+) {
+  await tx.messageOutbox.update({
+    where: { id: messageId },
+    data: {
+      status: "provider_window_expired",
+      providerWindowCheckedAt: now,
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
+    },
+  });
+  await tx.user.updateMany({
+    where: {
+      id: recipientUserId,
+      state: { not: "blocked" },
+    },
+    data: {
+      state: "unreachable",
+      matchingEnabled: false,
+    },
   });
 }
 
