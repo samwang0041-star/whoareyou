@@ -1,7 +1,7 @@
-import { Prisma, type UserState } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { parseCommand } from "../domain/commands";
-import { findOrCreateUserFromInbound, hashProviderUserId } from "../domain/identity";
+import { findOrCreateUserFromInbound } from "../domain/identity";
 import { tryMatchUser } from "../domain/matching";
 import { closeForLeave, reportConnection } from "../domain/safety";
 import type { NormalizedInboundEvent, OutboundMessage } from "../domain/types";
@@ -22,12 +22,6 @@ const FakeInboundSchema = z.object({
   text: TextSchema,
   receivedAt: ReceivedAtSchema,
 });
-
-type UserStateSnapshot = {
-  id: string;
-  state: UserState;
-  matchingEnabled: boolean;
-};
 
 export const fakeOpenClaw: OpenClawAdapter = {
   parseInbound(body: unknown): NormalizedInboundEvent {
@@ -74,23 +68,41 @@ async function claimInbound(event: NormalizedInboundEvent): Promise<boolean> {
     });
     return true;
   } catch (error) {
-    if (isUniqueConstraintError(error)) return false;
+    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event);
     throw error;
   }
 }
 
+async function reclaimExistingInbound(event: NormalizedInboundEvent): Promise<boolean> {
+  const staleProcessingBefore = new Date(event.receivedAt.getTime() - 5 * 60_000);
+  const claimed = await prisma.inboundDedupe.updateMany({
+    where: {
+      providerMessageKey: event.providerMessageKey,
+      OR: [
+        { status: "failed" },
+        { status: "processing", receivedAt: { lte: staleProcessingBefore } },
+      ],
+    },
+    data: {
+      status: "processing",
+      receivedAt: event.receivedAt,
+      processedAt: null,
+    },
+  });
+  return claimed.count === 1;
+}
+
 async function processClaimedInbound(event: NormalizedInboundEvent) {
   const command = parseCommand(event.text);
-  const previousUser = await findExistingUserSnapshot(event.providerUserId);
   const user = await findOrCreateUserFromInbound({
     providerUserId: event.providerUserId,
     receivedAt: event.receivedAt,
     replyWindowHours: envInt("PROVIDER_REPLY_WINDOW_HOURS", 24),
     sendQuota: envInt("PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE", 999),
+    preserveExistingState: true,
   });
 
-  if (previousUser?.state === "blocked") {
-    await restorePreviousUserState(previousUser);
+  if (user.state === "blocked") {
     return;
   }
 
@@ -101,14 +113,12 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
       body: voice.help(),
       now: event.receivedAt,
     });
-    await restorePreviousUserState(previousUser);
     return;
   }
 
   if (command.kind === "open" || command.kind === "continue") {
     const activeConnection = await findActiveConnection(user.id);
     if (activeConnection) {
-      await restorePreviousUserState(previousUser);
       return;
     }
 
@@ -145,7 +155,6 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
   if (command.kind === "leave") {
     if (!activeConnection) {
       await enqueueNoActiveMatch({ recipientUserId: user.id, event });
-      await restorePreviousUserState(previousUser);
       return;
     }
     await closeForLeave({
@@ -159,7 +168,6 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
   if (command.kind === "report") {
     if (!activeConnection) {
       await enqueueNoActiveMatch({ recipientUserId: user.id, event });
-      await restorePreviousUserState(previousUser);
       return;
     }
     await reportConnection({
@@ -179,31 +187,10 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
       body: command.text,
       now: event.receivedAt,
     });
-    await restorePreviousUserState(previousUser);
     return;
   }
 
   await enqueueNoActiveMatch({ recipientUserId: user.id, event });
-  await restorePreviousUserState(previousUser);
-}
-
-async function findExistingUserSnapshot(providerUserId: string): Promise<UserStateSnapshot | null> {
-  return prisma.user.findUnique({
-    where: { providerUserHash: hashProviderUserId(providerUserId) },
-    select: { id: true, state: true, matchingEnabled: true },
-  });
-}
-
-async function restorePreviousUserState(previousUser: UserStateSnapshot | null) {
-  if (!previousUser) return;
-
-  await prisma.user.update({
-    where: { id: previousUser.id },
-    data: {
-      state: previousUser.state,
-      matchingEnabled: previousUser.matchingEnabled,
-    },
-  });
 }
 
 async function findActiveConnection(userId: string) {

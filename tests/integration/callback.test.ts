@@ -161,6 +161,34 @@ describe("fake OpenClaw callback", () => {
     ).resolves.toEqual({ state: "matched" });
   });
 
+  it("refreshes reachability for an existing matched user without rewriting match state", async () => {
+    const connection = await createOpenMatch("state-user-a", "state-user-b");
+    const sender = await prisma.user.findUniqueOrThrow({
+      where: { providerUserHash: hashProviderUserId("state-user-a") },
+    });
+
+    await sendFake({
+      providerMessageKey: "state-preserving-message",
+      providerUserId: "state-user-a",
+      text: "我还在这里",
+      receivedAt: new Date("2026-06-30T10:05:00.000Z"),
+    });
+
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: sender.id },
+        select: { state: true, matchingEnabled: true, reachableUntil: true },
+      }),
+    ).resolves.toEqual({
+      state: "matched",
+      matchingEnabled: true,
+      reachableUntil: new Date("2026-07-01T10:05:00.000Z"),
+    });
+    await expect(prisma.connection.findUniqueOrThrow({ where: { id: connection.id } })).resolves.toMatchObject({
+      state: "active",
+    });
+  });
+
   it("answers ordinary unmatched messages with product copy instead of relaying", async () => {
     await sendFake({
       providerMessageKey: "unmatched-message",
@@ -233,5 +261,66 @@ describe("fake OpenClaw callback", () => {
       state: "awaiting_echo",
       closeReason: "reported",
     });
+  });
+
+  it("retries failed inbound callbacks with the same provider message key", async () => {
+    const input = fakeInbound({
+      providerMessageKey: "retry-failed-inbound",
+      providerUserId: "retry-user",
+      text: "帮助",
+    });
+    await prisma.inboundDedupe.create({
+      data: {
+        providerMessageKey: input.providerMessageKey,
+        receivedAt: input.receivedAt,
+        status: "failed",
+        processedAt: input.receivedAt,
+      },
+    });
+
+    await expect(handleFakeInbound(input)).resolves.toEqual({ status: "processed" });
+
+    await expect(prisma.inboundDedupe.findUniqueOrThrow({ where: { providerMessageKey: input.providerMessageKey } })).resolves.toMatchObject({
+      status: "processed",
+      processedAt: input.receivedAt,
+    });
+    await expect(prisma.messageOutbox.findUniqueOrThrow({ where: { idempotencyKey: "retry-failed-inbound:help" } })).resolves.toMatchObject({
+      bodyCiphertextOrBody: voice.help(),
+    });
+  });
+
+  it("retries stale processing inbound callbacks with the same provider message key", async () => {
+    const input = fakeInbound({
+      providerMessageKey: "retry-stale-processing",
+      providerUserId: "retry-stale-user",
+      text: "帮助",
+      receivedAt: now,
+    });
+    await prisma.inboundDedupe.create({
+      data: {
+        providerMessageKey: input.providerMessageKey,
+        receivedAt: new Date(now.getTime() - 10 * 60_000),
+        status: "processing",
+      },
+    });
+
+    await expect(handleFakeInbound(input)).resolves.toEqual({ status: "processed" });
+    await expect(prisma.inboundDedupe.findUniqueOrThrow({ where: { providerMessageKey: input.providerMessageKey } })).resolves.toMatchObject({
+      status: "processed",
+      receivedAt: now,
+      processedAt: now,
+    });
+  });
+
+  it("returns 400 for invalid callback payloads", async () => {
+    const response = await postCallback(
+      new Request("http://local.test/api/wechat/callback", {
+        method: "POST",
+        body: JSON.stringify({ providerMessageKey: "bad-payload" }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_payload" });
   });
 });

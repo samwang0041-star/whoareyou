@@ -11,6 +11,7 @@ export async function findOrCreateUserFromInbound(input: {
   receivedAt: Date;
   replyWindowHours: number;
   sendQuota: number;
+  preserveExistingState?: boolean;
 }) {
   const providerUserHash = hashProviderUserId(input.providerUserId);
   const reachability = computeReachability(input.receivedAt, {
@@ -19,26 +20,29 @@ export async function findOrCreateUserFromInbound(input: {
   });
 
   return prisma.$transaction(async (tx) => {
-    const user = await tx.user.upsert({
-      where: { providerUserHash },
-      create: {
-        providerUserHash,
-        state: "available",
-        matchingEnabled: true,
-        lastSeenAt: input.receivedAt,
-        lastUserMessageAt: reachability.lastUserMessageAt,
-        reachableUntil: reachability.reachableUntil,
-        providerSendQuota: reachability.providerSendQuota,
-      },
-      update: {
-        lastSeenAt: input.receivedAt,
-        lastUserMessageAt: reachability.lastUserMessageAt,
-        reachableUntil: reachability.reachableUntil,
-        providerSendQuota: reachability.providerSendQuota,
-        matchingEnabled: true,
-        state: "available",
-      },
-    });
+    const existingUser = await tx.user.findUnique({ where: { providerUserHash } });
+    const user = existingUser
+      ? await tx.user.update({
+          where: { id: existingUser.id },
+          data: {
+            lastSeenAt: input.receivedAt,
+            lastUserMessageAt: reachability.lastUserMessageAt,
+            reachableUntil: reachability.reachableUntil,
+            providerSendQuota: reachability.providerSendQuota,
+            ...(input.preserveExistingState ? {} : { matchingEnabled: true, state: "available" as const }),
+          },
+        })
+      : await tx.user.create({
+          data: {
+            providerUserHash,
+            state: "available",
+            matchingEnabled: true,
+            lastSeenAt: input.receivedAt,
+            lastUserMessageAt: reachability.lastUserMessageAt,
+            reachableUntil: reachability.reachableUntil,
+            providerSendQuota: reachability.providerSendQuota,
+          },
+        });
 
     await upsertReachabilityJob(tx, {
       userId: user.id,
