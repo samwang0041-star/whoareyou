@@ -288,12 +288,43 @@ function envInt(name: string, fallback: number): number {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+async function runOutboxWorkerLoop() {
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  while (!stopping) {
+    try {
+      await processOutboxBatch({
+        now: new Date(),
+        limit: envInt("SCHEDULED_JOB_BATCH_SIZE", 50),
+        send: async (message) => {
+          console.log(`fake-send:${message.recipientUserId}:${message.idempotencyKey}`);
+        },
+      });
+    } catch (error) {
+      console.error(error);
+    }
+    await sleep(envInt("WORKER_POLL_INTERVAL_MS", 5000));
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 if (require.main === module) {
-  processOutboxBatch({
-    now: new Date(),
-    limit: envInt("SCHEDULED_JOB_BATCH_SIZE", 50),
-    send: async (message) => {
-      console.log(`fake-send:${message.recipientUserId}:${message.idempotencyKey}`);
-    },
-  }).finally(() => prisma.$disconnect());
+  const run = process.env.WORKER_LOOP === "1"
+    ? runOutboxWorkerLoop()
+    : processOutboxBatch({
+        now: new Date(),
+        limit: envInt("SCHEDULED_JOB_BATCH_SIZE", 50),
+        send: async (message) => {
+          console.log(`fake-send:${message.recipientUserId}:${message.idempotencyKey}`);
+        },
+      });
+  run.finally(() => prisma.$disconnect());
 }

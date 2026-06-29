@@ -14,6 +14,7 @@ const EnvSchema = z.object({
   OUTBOX_BODY_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   OUTBOX_MAX_RETRIES: z.coerce.number().int().positive().default(3),
   SCHEDULED_JOB_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
