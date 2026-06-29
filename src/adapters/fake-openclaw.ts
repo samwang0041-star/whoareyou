@@ -38,7 +38,8 @@ export const fakeOpenClaw: OpenClawAdapter = {
 export type FakeInboundResult = { status: "processed" } | { status: "duplicate" };
 
 export async function handleFakeInbound(event: NormalizedInboundEvent): Promise<FakeInboundResult> {
-  const didClaim = await claimInbound(event, new Date());
+  const claimedAt = new Date();
+  const didClaim = await claimInbound(event, claimedAt);
   if (!didClaim) return { status: "duplicate" };
 
   try {
@@ -57,36 +58,38 @@ export async function handleFakeInbound(event: NormalizedInboundEvent): Promise<
   }
 }
 
-async function claimInbound(event: NormalizedInboundEvent, now: Date): Promise<boolean> {
+async function claimInbound(event: NormalizedInboundEvent, claimedAt: Date): Promise<boolean> {
   try {
     await prisma.inboundDedupe.create({
       data: {
         providerMessageKey: event.providerMessageKey,
         receivedAt: event.receivedAt,
         status: "processing",
+        processedAt: claimedAt,
       },
     });
     return true;
   } catch (error) {
-    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event, now);
+    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event, claimedAt);
     throw error;
   }
 }
 
-async function reclaimExistingInbound(event: NormalizedInboundEvent, now: Date): Promise<boolean> {
-  const staleProcessingBefore = new Date(now.getTime() - 5 * 60_000);
+async function reclaimExistingInbound(event: NormalizedInboundEvent, claimedAt: Date): Promise<boolean> {
+  const staleProcessingBefore = new Date(claimedAt.getTime() - 5 * 60_000);
   const claimed = await prisma.inboundDedupe.updateMany({
     where: {
       providerMessageKey: event.providerMessageKey,
       OR: [
         { status: "failed" },
-        { status: "processing", receivedAt: { lte: staleProcessingBefore } },
+        { status: "processing", processedAt: { lte: staleProcessingBefore } },
+        { status: "processing", processedAt: null, receivedAt: { lte: staleProcessingBefore } },
       ],
     },
     data: {
       status: "processing",
       receivedAt: event.receivedAt,
-      processedAt: null,
+      processedAt: claimedAt,
     },
   });
   return claimed.count === 1;

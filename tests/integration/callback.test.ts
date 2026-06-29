@@ -338,6 +338,7 @@ describe("fake OpenClaw callback", () => {
         providerMessageKey: input.providerMessageKey,
         receivedAt: input.receivedAt,
         status: "processing",
+        processedAt: new Date(Date.now() - 10 * 60_000),
       },
     });
 
@@ -346,6 +347,32 @@ describe("fake OpenClaw callback", () => {
       status: "processed",
       receivedAt: input.receivedAt,
       processedAt: input.receivedAt,
+    });
+  });
+
+  it("does not reclaim a fresh processing inbound callback", async () => {
+    const input = fakeInbound({
+      providerMessageKey: "fresh-processing",
+      providerUserId: "fresh-processing-user",
+      text: "帮助",
+      receivedAt: new Date("2026-01-01T10:00:00.000Z"),
+    });
+    const claimedAt = new Date();
+    await prisma.inboundDedupe.create({
+      data: {
+        providerMessageKey: input.providerMessageKey,
+        receivedAt: input.receivedAt,
+        status: "processing",
+        processedAt: claimedAt,
+      },
+    });
+
+    await expect(handleFakeInbound(input)).resolves.toEqual({ status: "duplicate" });
+    await expect(prisma.messageOutbox.count()).resolves.toBe(0);
+    await expect(prisma.inboundDedupe.findUniqueOrThrow({ where: { providerMessageKey: input.providerMessageKey } })).resolves.toMatchObject({
+      status: "processing",
+      receivedAt: input.receivedAt,
+      processedAt: claimedAt,
     });
   });
 
