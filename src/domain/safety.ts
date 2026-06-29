@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../storage/prisma";
 
@@ -129,7 +130,7 @@ export async function submitEcho(input: SubmitEchoInput) {
           connectionId: connection.id,
           fromUserId: input.fromUserId,
           toUserId: otherUserId(connection, input.fromUserId),
-          body: input.body,
+          body: storedEchoBody(input.body),
           createdAt: now,
         },
       });
@@ -190,8 +191,14 @@ async function moveNonBlockedUsersToCooldown(tx: SafetyTransaction, userIds: str
     },
     data: {
       state: "cooldown",
+      matchingEnabled: true,
     },
   });
+}
+
+function storedEchoBody(body: string): string {
+  const digest = createHash("sha256").update(body).digest("hex");
+  return `sha256:${digest}:length:${body.length}`;
 }
 
 function isUniqueEchoError(error: unknown): boolean {

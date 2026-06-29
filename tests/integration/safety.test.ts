@@ -14,12 +14,12 @@ async function cleanDatabase() {
   await prisma.user.deleteMany();
 }
 
-async function createMatchedUser(providerUserHash: string) {
+async function createMatchedUser(providerUserHash: string, matchingEnabled = true) {
   return prisma.user.create({
     data: {
       providerUserHash,
       state: "matched",
-      matchingEnabled: true,
+      matchingEnabled,
     },
   });
 }
@@ -47,8 +47,8 @@ describe("safety actions", () => {
   });
 
   it("leave closes the active connection, blocks the pair, and moves both users to cooldown", async () => {
-    const leavingUser = await createMatchedUser("safety-leave-actor");
-    const otherUser = await createMatchedUser("safety-leave-other");
+    const leavingUser = await createMatchedUser("safety-leave-actor", false);
+    const otherUser = await createMatchedUser("safety-leave-other", false);
     const connection = await createActiveConnection(leavingUser.id, otherUser.id);
 
     await closeForLeave({
@@ -68,6 +68,29 @@ describe("safety actions", () => {
 
     const users = await prisma.user.findMany({
       where: { id: { in: [leavingUser.id, otherUser.id] } },
+      orderBy: { providerUserHash: "asc" },
+      select: { state: true, matchingEnabled: true },
+    });
+    expect(users).toEqual([
+      { state: "cooldown", matchingEnabled: true },
+      { state: "cooldown", matchingEnabled: true },
+    ]);
+  });
+
+  it("report keeps non-blocked users eligible for future random matching", async () => {
+    const reporter = await createMatchedUser("safety-report-open-reporter", false);
+    const reported = await createMatchedUser("safety-report-open-reported", false);
+    const connection = await createActiveConnection(reporter.id, reported.id);
+
+    await reportConnection({
+      connectionId: connection.id,
+      reporterUserId: reporter.id,
+      reason: "user_requested",
+      now,
+    });
+
+    const users = await prisma.user.findMany({
+      where: { id: { in: [reporter.id, reported.id] } },
       orderBy: { providerUserHash: "asc" },
       select: { state: true, matchingEnabled: true },
     });
@@ -144,7 +167,10 @@ describe("safety actions", () => {
       connectionId: connection.id,
       fromUserId: fromUser.id,
       toUserId: toUser.id,
-      body: "Thanks for the conversation.",
+      body: expect.stringMatching(/^sha256:[a-f0-9]{64}:length:28$/),
+    });
+    await expect(prisma.echo.findFirstOrThrow()).resolves.toMatchObject({
+      body: expect.not.stringContaining("Thanks for the conversation."),
     });
 
     await expect(
