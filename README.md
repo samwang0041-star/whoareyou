@@ -2,7 +2,7 @@
 
 一个借用微信 AI 入口，让两个真实的人短暂相遇一小时的产品实验。
 
-This is a product experiment that uses a WeChat AI entry point to let two real people meet for one bounded hour.
+This is a product experiment that uses a WeChat AI-style entry point to let two real people meet for one bounded hour.
 
 ## 为什么做这个
 
@@ -40,7 +40,7 @@ The product thesis is simple:
 
 - 首屏极简：`你是谁`，以及“扫码，遇见一个陌生人。”
 - 用户通过微信 AI / OpenClaw 入口进入。
-- 服务端只保留匿名内部身份，不保存昵称、头像、手机号或聊天记录。
+- 服务端只保留匿名内部身份，不保存昵称、头像、手机号或明文聊天记录。
 - 系统只在可匹配、未封禁、OpenClaw 可触达窗口足够的用户之间随机匹配。
 - 每段相遇一小时，每 10 分钟有一次产品声音提醒。
 - 任何一方可以发 `离开` 断开。
@@ -52,13 +52,109 @@ The product thesis is simple:
 
 - A minimal landing page: `你是谁`, plus “scan to meet a stranger.”
 - Users enter through the WeChat AI / OpenClaw entry point.
-- The server keeps only anonymous internal identity, not nicknames, avatars, phone numbers, or chat history.
+- The server keeps only anonymous internal identity, not nicknames, avatars, phone numbers, or readable chat history.
 - Matching only happens between eligible users who are open, not blocked, and still reachable through the OpenClaw window.
 - Each encounter lasts one hour, with product reminders every 10 minutes.
 - Either person can send `离开` to leave.
 - `暂停` closes future random matching; `打开` or `继续` opens it again.
 - Ending, leaving, or reporting does not close the entrance by default. It enters a short cooldown, then waits for another unexpected encounter if still open.
 - The OpenClaw entry is modeled with an approximately 24-hour reachability window from the user's last inbound message. Before it expires, the product asks whether to keep the entrance open; no reply closes matching.
+
+## 当前 MVP
+
+This repository now contains the deployable MVP implementation:
+
+- Next.js App Router web entry and private admin dashboard.
+- PostgreSQL + Prisma source of truth for users, connections, reports, pair blocks, outbox, jobs, errors, and metrics.
+- Fake-testable OpenClaw callback route at `/api/wechat/callback`.
+- QR route at `/api/qr`.
+- One-hour matching, 10-minute reminders, close/echo flow, leave/report/pair-block/three-report block.
+- 24-hour-style provider reachability window with renewal prompt and expiry.
+- Privacy-safe admin overview, health, safety, anonymous connection list, and anonymous detail pages.
+- Outbox and scheduled-job workers for database-backed retries and timed behavior.
+- Unit, integration, and Playwright E2E coverage.
+
+## Privacy Boundaries
+
+- No raw provider user id is stored.
+- No nickname, avatar, phone number, or profile field is collected.
+- Provider identity is stored only as a SHA-256 hash.
+- Admin anonymous IDs are derived from a keyed HMAC and do not expose provider hash prefixes.
+- Outbox bodies are cleared after send/failure/expiry.
+- Echo text is stored as `[redacted]`.
+- Admin APIs must not return provider hashes, idempotency keys, outbox bodies, echo bodies, or arbitrary worker metadata.
+
+## Local Development
+
+Requirements:
+
+- Node.js 20+
+- PostgreSQL
+
+Setup:
+
+```bash
+npm install
+cp .env.example .env
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npx prisma migrate deploy
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npx prisma generate
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' ADMIN_TOKEN='dev-admin-token' npm run dev
+```
+
+Open:
+
+- Web: `http://localhost:3000`
+- Admin: `http://localhost:3000/admin`
+
+## Production Deploy
+
+See [docs/deploy.md](docs/deploy.md).
+
+Minimum production process model:
+
+```text
+web                npm run start
+outbox-worker      npm run worker:outbox:loop
+scheduled-worker   npm run worker:scheduled:loop
+release/migration  npm run db:migrate
+```
+
+Build:
+
+```bash
+npm ci
+DATABASE_URL='postgresql://...' npx prisma generate
+DATABASE_URL='postgresql://...' ADMIN_TOKEN='...' npm run build
+DATABASE_URL='postgresql://...' npm run db:migrate
+```
+
+Callback URL for the OpenClaw-style entry:
+
+```text
+https://<your-domain>/api/wechat/callback
+```
+
+Admin URL:
+
+```text
+https://<your-domain>/admin
+```
+
+## Verification
+
+Full local verification used for this MVP:
+
+```bash
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npx prisma migrate deploy
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npx prisma generate
+npm run lint
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npm run typecheck
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npm test
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' ADMIN_TOKEN='dev-admin-token' npm run test:e2e
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' ADMIN_TOKEN='dev-admin-token' npm run build
+```
+
+Database-backed tests share one PostgreSQL database. Run separate Vitest processes sequentially, not in parallel.
 
 ## 不是
 
@@ -74,12 +170,7 @@ The product thesis is simple:
 - Not another machine optimized to keep people stuck.
 - Not AI pretending to be human, and not humans pretending to be AI.
 
-## 当前状态
+## Key Documents
 
-这是第一版 MVP 的设计与实现计划阶段。
-
-Key documents:
-
-- `docs/superpowers/specs/2026-06-29-admin-ops-dashboard-design.md`
-- `docs/superpowers/plans/2026-06-29-whoareyou-mvp.md`
-
+- [MVP implementation plan](docs/superpowers/plans/2026-06-29-whoareyou-mvp.md)
+- [Admin ops dashboard spec](docs/superpowers/specs/2026-06-29-admin-ops-dashboard-design.md)
