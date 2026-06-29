@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { fakeOpenClaw } from "../../../src/adapters/fake-openclaw";
+import { getFakeEntryQr } from "../../../src/adapters/fake-openclaw-entry";
 
 export async function GET() {
-  const qr = await fakeOpenClaw.getEntryQr();
-  return NextResponse.json(qr);
+  return NextResponse.json(await getFakeEntryQr());
 }

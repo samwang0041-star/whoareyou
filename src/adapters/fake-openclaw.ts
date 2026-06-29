@@ -7,6 +7,7 @@ import { closeForLeave, reportConnection } from "../domain/safety";
 import type { NormalizedInboundEvent, OutboundMessage } from "../domain/types";
 import { voice } from "../domain/voice";
 import { prisma } from "../storage/prisma";
+import { getFakeEntryQr } from "./fake-openclaw-entry";
 import type { OpenClawAdapter } from "./openclaw";
 
 const NonEmptyStringSchema = z.union([z.string(), z.number()]).transform(String).pipe(z.string().min(1));
@@ -31,7 +32,7 @@ export const fakeOpenClaw: OpenClawAdapter = {
     console.log(JSON.stringify({ fakeOutbound: message }));
   },
   async getEntryQr() {
-    return { url: "/api/wechat/callback?fake=1" };
+    return getFakeEntryQr();
   },
 };
 
