@@ -12,6 +12,8 @@ async function createUser(providerUserHash: string) {
 
 describe("connection invariants", () => {
   beforeEach(async () => {
+    await prisma.echo.deleteMany();
+    await prisma.report.deleteMany();
     await prisma.messageOutbox.deleteMany();
     await prisma.scheduledJob.deleteMany();
     await prisma.connection.deleteMany();

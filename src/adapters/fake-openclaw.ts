@@ -38,7 +38,7 @@ export const fakeOpenClaw: OpenClawAdapter = {
 export type FakeInboundResult = { status: "processed" } | { status: "duplicate" };
 
 export async function handleFakeInbound(event: NormalizedInboundEvent): Promise<FakeInboundResult> {
-  const didClaim = await claimInbound(event);
+  const didClaim = await claimInbound(event, new Date());
   if (!didClaim) return { status: "duplicate" };
 
   try {
@@ -57,7 +57,7 @@ export async function handleFakeInbound(event: NormalizedInboundEvent): Promise<
   }
 }
 
-async function claimInbound(event: NormalizedInboundEvent): Promise<boolean> {
+async function claimInbound(event: NormalizedInboundEvent, now: Date): Promise<boolean> {
   try {
     await prisma.inboundDedupe.create({
       data: {
@@ -68,13 +68,13 @@ async function claimInbound(event: NormalizedInboundEvent): Promise<boolean> {
     });
     return true;
   } catch (error) {
-    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event);
+    if (isUniqueConstraintError(error)) return reclaimExistingInbound(event, now);
     throw error;
   }
 }
 
-async function reclaimExistingInbound(event: NormalizedInboundEvent): Promise<boolean> {
-  const staleProcessingBefore = new Date(event.receivedAt.getTime() - 5 * 60_000);
+async function reclaimExistingInbound(event: NormalizedInboundEvent, now: Date): Promise<boolean> {
+  const staleProcessingBefore = new Date(now.getTime() - 5 * 60_000);
   const claimed = await prisma.inboundDedupe.updateMany({
     where: {
       providerMessageKey: event.providerMessageKey,
@@ -219,14 +219,16 @@ async function enqueueToUser(input: {
   body: string;
   now: Date;
 }) {
-  await prisma.messageOutbox.create({
-    data: {
+  await prisma.messageOutbox.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    create: {
       connectionId: input.connectionId,
       recipientUserId: input.recipientUserId,
       idempotencyKey: input.idempotencyKey,
       bodyCiphertextOrBody: input.body,
       nextAttemptAt: input.now,
     },
+    update: {},
   });
 }
 

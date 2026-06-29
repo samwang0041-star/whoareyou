@@ -4,6 +4,8 @@ import { prisma } from "../../src/storage/prisma";
 
 describe("identity", () => {
   beforeEach(async () => {
+    await prisma.echo.deleteMany();
+    await prisma.report.deleteMany();
     await prisma.messageOutbox.deleteMany();
     await prisma.connection.deleteMany();
     await prisma.scheduledJob.deleteMany();

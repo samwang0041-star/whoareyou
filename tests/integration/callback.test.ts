@@ -289,17 +289,54 @@ describe("fake OpenClaw callback", () => {
     });
   });
 
+  it("treats retry-created duplicate outbox rows as idempotent", async () => {
+    const input = fakeInbound({
+      providerMessageKey: "retry-partial-outbox",
+      providerUserId: "retry-partial-user",
+      text: "帮助",
+    });
+    const user = await prisma.user.create({
+      data: {
+        providerUserHash: hashProviderUserId(input.providerUserId),
+        state: "available",
+        matchingEnabled: true,
+      },
+    });
+    await prisma.inboundDedupe.create({
+      data: {
+        providerMessageKey: input.providerMessageKey,
+        receivedAt: input.receivedAt,
+        status: "failed",
+        processedAt: input.receivedAt,
+      },
+    });
+    await prisma.messageOutbox.create({
+      data: {
+        recipientUserId: user.id,
+        idempotencyKey: "retry-partial-outbox:help",
+        bodyCiphertextOrBody: voice.help(),
+      },
+    });
+
+    await expect(handleFakeInbound(input)).resolves.toEqual({ status: "processed" });
+
+    await expect(prisma.messageOutbox.count({ where: { idempotencyKey: "retry-partial-outbox:help" } })).resolves.toBe(1);
+    await expect(prisma.inboundDedupe.findUniqueOrThrow({ where: { providerMessageKey: input.providerMessageKey } })).resolves.toMatchObject({
+      status: "processed",
+    });
+  });
+
   it("retries stale processing inbound callbacks with the same provider message key", async () => {
     const input = fakeInbound({
       providerMessageKey: "retry-stale-processing",
       providerUserId: "retry-stale-user",
       text: "帮助",
-      receivedAt: now,
+      receivedAt: new Date("2026-01-01T10:00:00.000Z"),
     });
     await prisma.inboundDedupe.create({
       data: {
         providerMessageKey: input.providerMessageKey,
-        receivedAt: new Date(now.getTime() - 10 * 60_000),
+        receivedAt: input.receivedAt,
         status: "processing",
       },
     });
@@ -307,8 +344,8 @@ describe("fake OpenClaw callback", () => {
     await expect(handleFakeInbound(input)).resolves.toEqual({ status: "processed" });
     await expect(prisma.inboundDedupe.findUniqueOrThrow({ where: { providerMessageKey: input.providerMessageKey } })).resolves.toMatchObject({
       status: "processed",
-      receivedAt: now,
-      processedAt: now,
+      receivedAt: input.receivedAt,
+      processedAt: input.receivedAt,
     });
   });
 
