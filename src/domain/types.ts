@@ -15,6 +15,7 @@ export type CloseReason = "timeout" | "left" | "reported" | "provider_expired";
 export type OutboxStatus =
   | "pending"
   | "retrying"
+  | "sending"
   | "sent"
   | "failed"
   | "provider_window_expired";

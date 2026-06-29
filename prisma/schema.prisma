@@ -34,6 +34,7 @@ enum CloseReason {
 enum OutboxStatus {
   pending
   retrying
+  sending
   sent
   failed
   provider_window_expired
