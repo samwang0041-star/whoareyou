@@ -130,4 +130,105 @@ describe("transactional matching", () => {
       }),
     ).resolves.toEqual({ state: "waiting" });
   });
+
+  it("handles simultaneous match attempts for the same pair with one connection", async () => {
+    const currentUser = await createMatchableUser("matching-race-current");
+    const candidate = await createMatchableUser("matching-race-candidate");
+
+    const results = await Promise.allSettled([
+      tryMatchUser({
+        userId: currentUser.id,
+        now,
+        minReachableMinutesToMatch: 60,
+      }),
+      tryMatchUser({
+        userId: candidate.id,
+        now,
+        minReachableMinutesToMatch: 60,
+      }),
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ status: "fulfilled" }),
+      expect.objectContaining({ status: "fulfilled" }),
+    ]);
+
+    const values = results.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
+    expect(values.map((result) => result.status).sort()).toEqual(["matched", "not_eligible"]);
+
+    await expect(prisma.connection.count()).resolves.toBe(1);
+  });
+
+  it("marks an insufficiently reachable user unreachable and disables matching", async () => {
+    const currentUser = await prisma.user.create({
+      data: {
+        providerUserHash: "matching-short-reachability",
+        state: "available",
+        matchingEnabled: true,
+        reachableUntil: new Date("2026-06-30T10:30:00.000Z"),
+      },
+    });
+
+    const result = await tryMatchUser({
+      userId: currentUser.id,
+      now,
+      minReachableMinutesToMatch: 60,
+    });
+
+    expect(result).toEqual({ status: "not_eligible" });
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: currentUser.id },
+        select: { state: true, matchingEnabled: true },
+      }),
+    ).resolves.toEqual({ state: "unreachable", matchingEnabled: false });
+    await expect(prisma.connection.count()).resolves.toBe(0);
+  });
+
+  it("returns not eligible for a user with an existing active connection", async () => {
+    const currentUser = await createMatchableUser("matching-existing-current");
+    const connectedUser = await createMatchableUser("matching-existing-connected");
+    await createMatchableUser("matching-existing-candidate");
+    await prisma.connection.create({
+      data: {
+        userAId: currentUser.id,
+        userBId: connectedUser.id,
+        state: "active",
+        startedAt: now,
+      },
+    });
+
+    const result = await tryMatchUser({
+      userId: currentUser.id,
+      now,
+      minReachableMinutesToMatch: 60,
+    });
+
+    expect(result).toEqual({ status: "not_eligible" });
+    await expect(prisma.connection.count()).resolves.toBe(1);
+  });
+
+  it.each(["blocked", "paused"] as const)("returns not eligible for a %s user", async (state) => {
+    const currentUser = await prisma.user.create({
+      data: {
+        providerUserHash: `matching-${state}-current`,
+        state,
+        matchingEnabled: true,
+        reachableUntil,
+      },
+    });
+    await createMatchableUser(`matching-${state}-candidate`);
+
+    const result = await tryMatchUser({
+      userId: currentUser.id,
+      now,
+      minReachableMinutesToMatch: 60,
+    });
+
+    expect(result).toEqual({ status: "not_eligible" });
+    await expect(prisma.connection.count()).resolves.toBe(0);
+  });
 });
