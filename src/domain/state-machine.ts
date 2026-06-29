@@ -17,6 +17,7 @@ export type UserEvent =
   | "blocked";
 
 export function transitionUser(user: UserSnapshot, event: UserEvent): UserSnapshot {
+  if (user.state === "blocked") return { state: "blocked", matchingEnabled: false };
   if (event === "blocked") return { state: "blocked", matchingEnabled: false };
   if (event === "provider_expired") return { state: "unreachable", matchingEnabled: false };
   if (event === "pause") return { state: "paused", matchingEnabled: false };
