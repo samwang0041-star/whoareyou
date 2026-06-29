@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import AdminPage from "../../app/admin/page";
@@ -23,6 +23,10 @@ async function cleanDatabase() {
 describe("admin overview metrics", () => {
   beforeEach(async () => {
     await cleanDatabase();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("reports aggregate overview metrics without provider identity or chat bodies", async () => {
@@ -242,11 +246,12 @@ describe("admin overview metrics", () => {
     });
 
     expect(overview).toMatchObject({
-      scannedUsers: 1,
+      scannedUsers: 2,
       recentUsers: 2,
       matchingEnabledUsers: 7,
       openUsers: 3,
       reachableUsers: 2,
+      reachableEntranceUsers: 6,
       waitingUsers: 3,
       activeConnections: 1,
       endingConnections: 1,
@@ -270,9 +275,9 @@ describe("admin overview metrics", () => {
   });
 
   it("protects the overview API with a bearer admin token", async () => {
-    process.env.ADMIN_TOKEN = "test-admin-token";
-    process.env.MIN_REACHABLE_MINUTES_TO_MATCH = "70";
-    process.env.REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES = "60";
+    vi.stubEnv("ADMIN_TOKEN", "test-admin-token");
+    vi.stubEnv("MIN_REACHABLE_MINUTES_TO_MATCH", "70");
+    vi.stubEnv("REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES", "60");
 
     await prisma.user.create({
       data: {
@@ -299,8 +304,8 @@ describe("admin overview metrics", () => {
   });
 
   it("renders a quiet aggregate admin dashboard", async () => {
-    process.env.MIN_REACHABLE_MINUTES_TO_MATCH = "70";
-    process.env.REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES = "60";
+    vi.stubEnv("MIN_REACHABLE_MINUTES_TO_MATCH", "70");
+    vi.stubEnv("REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES", "60");
 
     await prisma.user.create({
       data: {

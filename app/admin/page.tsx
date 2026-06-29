@@ -19,11 +19,20 @@ export default function AdminPage() {
         cache: "no-store",
         headers: { authorization: `Bearer ${adminToken}` },
       });
-      if (!response.ok) throw new Error("overview_unauthorized");
+      if (response.status === 401 || response.status === 403) {
+        setOverview(null);
+        setStatus("error");
+        return;
+      }
+      if (!response.ok) {
+        if (quiet) return;
+        throw new Error("overview_unavailable");
+      }
 
       setOverview((await response.json()) as AdminOverview);
       setStatus("ready");
     } catch {
+      if (quiet) return;
       setOverview(null);
       setStatus("error");
     }

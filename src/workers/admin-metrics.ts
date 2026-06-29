@@ -14,6 +14,7 @@ export type AdminOverview = {
   matchingEnabledUsers: number;
   openUsers: number;
   reachableUsers: number;
+  reachableEntranceUsers: number;
   reachableEntranceRate: number;
   waitingUsers: number;
   activeConnections: number;
@@ -50,6 +51,7 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
     scannedUsers,
     recentUsers,
     nonBlockedUsers,
+    reachableEntranceUsers,
     matchingEnabledUsers,
     openUsers,
     reachableUsers,
@@ -70,7 +72,14 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
     echoedClosedConnectionRows,
     oldestDueJob,
   ] = await Promise.all([
-    prisma.user.count({ where: { createdAt: { gte: recentSince } } }),
+    prisma.user.count({
+      where: {
+        OR: [
+          { createdAt: { gte: recentSince } },
+          { lastSeenAt: { gte: recentSince } },
+        ],
+      },
+    }),
     prisma.user.count({
       where: {
         OR: [
@@ -80,6 +89,13 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
       },
     }),
     prisma.user.count({ where: { state: { not: "blocked" } } }),
+    prisma.user.count({
+      where: {
+        matchingEnabled: true,
+        state: { not: "blocked" },
+        reachableUntil: { gte: reachableCutoff },
+      },
+    }),
     prisma.user.count({ where: { matchingEnabled: true, state: { not: "blocked" } } }),
     prisma.user.count({
       where: {
@@ -144,7 +160,8 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
     matchingEnabledUsers,
     openUsers,
     reachableUsers,
-    reachableEntranceRate: rate(reachableUsers, nonBlockedUsers),
+    reachableEntranceUsers,
+    reachableEntranceRate: rate(reachableEntranceUsers, nonBlockedUsers),
     waitingUsers,
     activeConnections,
     endingConnections,
