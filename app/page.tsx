@@ -42,18 +42,18 @@ const pageCopy = {
     localeName: "中文",
     switchLabel: "EN",
     switchAria: "Switch to English",
-    topLine: "AI 工具之外",
+    topLine: "一个被遗弃的入口",
     hour: "one hour",
     title: "UNKNOWN",
-    lead: "不是新的 agent。\n也不是匿名社交。",
-    subLead: "把入口留在微信里。也许某一刻，会有另一个未知的信号靠近。",
+    lead: "被我遗弃很久的微信 AI 入口，有一天突然传来一段陌生的声音。\n我以为是我的 agent 出了故障。",
+    subLead: "后来才发现，另一端也有人接入。一个莫名其妙的 bug，把两个以为正在找 agent 的人，接到了一起。",
     enterIdle: "进入",
     enterLoading: "入口亮起中",
     enterConnected: "入口已亮",
-    enterHelper: "扫码后，回到微信发「打开」。一小时。",
+    enterHelper: "进入这个入口。也许 bug 只会存在一小时。",
     connectedHelper: "回到微信，发「打开」。",
-    sideNote: "开源。不保存昵称、头像、手机号或明文聊天。",
-    footerLine: "vibe coding 很久以后，只想做一个自己觉得有意思的小东西。",
+    sideNote: "一小时后，程序员修好了它。连接断开，但那次不期而遇还留着。",
+    footerLine: "开源。不保存昵称、头像、手机号或明文聊天。只是把这个入口暂时留在这里。",
     github: "GitHub",
     experience: "体验入口",
     contactPrefix: "如有侵权，联系",
@@ -100,18 +100,18 @@ const pageCopy = {
     localeName: "English",
     switchLabel: "中",
     switchAria: "切换到中文",
-    topLine: "outside the tools",
+    topLine: "an abandoned entrance",
     hour: "one hour",
     title: "UNKNOWN",
-    lead: "Not another agent.\nNot anonymous social.",
-    subLead: "Leave the entrance in WeChat. At some unknown moment, another signal may come close.",
+    lead: "One day, a long-abandoned WeChat AI entrance returned a stranger's voice.\nI thought my agent had broken.",
+    subLead: "Then I realized someone else had entered from the other side. A strange bug connected two people who both thought they were reaching an agent.",
     enterIdle: "Enter",
     enterLoading: "Lighting up",
     enterConnected: "Entrance lit",
-    enterHelper: "Scan, return to WeChat, send “打开”. One hour.",
+    enterHelper: "Enter this doorway. The bug may only last one hour.",
     connectedHelper: "Return to WeChat and send “打开”.",
-    sideNote: "Open source. No nicknames, avatars, phone numbers, or readable chat history.",
-    footerLine: "After too much vibe coding, I wanted to make one small thing that still felt interesting.",
+    sideNote: "An hour later, the programmer fixed it. The connection disappeared, but the accident stayed.",
+    footerLine: "Open source. No nicknames, avatars, phone numbers, or readable chat history. This entrance is only left here for a while.",
     github: "GitHub",
     experience: "Try it",
     contactPrefix: "If this infringes your rights, contact",
@@ -476,7 +476,7 @@ export default function HomePage() {
           fill
           priority
           sizes="100vw"
-          src="/whoareyou-main-visual.png"
+          src="/whoareyou-main-visual-abstract.png"
         />
         <div className="absolute inset-0 bg-[linear-gradient(90deg,#0c0b10_0%,rgba(12,11,16,0.9)_28%,rgba(12,11,16,0.5)_48%,rgba(12,11,16,0.04)_72%,rgba(12,11,16,0.22)_100%)]" />
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(12,11,16,0.7)_0%,rgba(12,11,16,0.38)_62%,rgba(12,11,16,0.1)_100%)] sm:hidden" />
