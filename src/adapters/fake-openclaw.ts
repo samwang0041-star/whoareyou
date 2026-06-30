@@ -1,9 +1,11 @@
-import { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
+import { Prisma, type UserState } from "@prisma/client";
 import { z } from "zod";
 import { parseCommand } from "../domain/commands";
 import { findOrCreateUserFromInbound } from "../domain/identity";
-import { tryMatchUser } from "../domain/matching";
-import { closeForLeave, reportConnection, submitEcho } from "../domain/safety";
+import { matchWaitingUsers, tryMatchUser } from "../domain/matching";
+import { encryptOutboxBody } from "../domain/outbox-body";
+import { closeForLeave, reportConnection } from "../domain/safety";
 import type { NormalizedInboundEvent, OutboundMessage } from "../domain/types";
 import { voice } from "../domain/voice";
 import { prisma } from "../storage/prisma";
@@ -29,14 +31,25 @@ export const fakeOpenClaw: OpenClawAdapter = {
     return FakeInboundSchema.parse(body);
   },
   async sendOutbound(message: OutboundMessage) {
-    console.log(JSON.stringify({ fakeOutbound: message }));
+    console.log(JSON.stringify({ event: "fakeOutbound", count: 1, messageHash: shortHash(message.idempotencyKey) }));
   },
-  async getEntryQr() {
-    return getFakeEntryQr();
+  async getEntryQr(origin: string) {
+    return getFakeEntryQr(origin);
   },
 };
 
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
 export type FakeInboundResult = { status: "processed" } | { status: "duplicate" };
+type AfterInboundUserLoadHook = (input: { userId: string; event: NormalizedInboundEvent }) => Promise<void>;
+
+let afterInboundUserLoadHook: AfterInboundUserLoadHook | null = null;
+
+export function setAfterInboundUserLoadHookForTest(hook: AfterInboundUserLoadHook | null) {
+  afterInboundUserLoadHook = hook;
+}
 
 export async function handleFakeInbound(event: NormalizedInboundEvent): Promise<FakeInboundResult> {
   const claimedAt = new Date();
@@ -113,31 +126,52 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
   if (user.state === "blocked") {
     return;
   }
+  if (afterInboundUserLoadHook) {
+    await afterInboundUserLoadHook({ userId: user.id, event });
+  }
+  if (!(await canUserContinue(user.id))) {
+    return;
+  }
 
   if (command.kind === "help") {
+    if (!(await canUserContinue(user.id))) return;
     await enqueueToUser({
       recipientUserId: user.id,
       idempotencyKey: `${event.providerMessageKey}:help`,
-      body: voice.help(),
+      body: await helpBodyForUser(user.id),
       now: event.receivedAt,
     });
     return;
   }
 
   if (command.kind === "open" || command.kind === "continue") {
+    if (user.state === "cooldown") {
+      await enqueueToUser({
+        recipientUserId: user.id,
+        idempotencyKey: `${event.providerMessageKey}:cooldown`,
+        body: voice.cooldownActive(),
+        now: event.receivedAt,
+      });
+      return;
+    }
+
     const activeConnection = await findActiveConnection(user.id);
     if (activeConnection) {
       return;
     }
 
-    await prisma.user.update({
-      where: { id: user.id },
+    const opened = await prisma.user.updateMany({
+      where: { id: user.id, state: { not: "blocked" } },
       data: { state: "available", matchingEnabled: true },
     });
+    if (opened.count === 0) return;
+
     const match = await tryMatchUser({
       userId: user.id,
       now: event.receivedAt,
       minReachableMinutesToMatch: envInt("MIN_REACHABLE_MINUTES_TO_MATCH", 70),
+      maxActiveConnections: envInt("MAX_ACTIVE_CONNECTIONS", 5),
+      maxWaitingUsers: envInt("MAX_WAITING_USERS", 20),
     });
     if (match.status === "waiting") {
       await enqueueToUser({
@@ -147,73 +181,138 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
         now: event.receivedAt,
       });
     }
-    return;
-  }
-
-  if (command.kind === "pause") {
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { state: "paused", matchingEnabled: false },
-    });
+    if (match.status === "capacity_full") {
+      await enqueueToUser({
+        recipientUserId: user.id,
+        idempotencyKey: `${event.providerMessageKey}:capacity-full`,
+        body: voice.capacityFull(),
+        now: event.receivedAt,
+      });
+    }
     return;
   }
 
   const activeConnection = await findActiveConnection(user.id);
 
+  if (command.kind === "pause") {
+    if (activeConnection) {
+      await prisma.user.updateMany({
+        where: { id: user.id, state: { not: "blocked" } },
+        data: { matchingEnabled: false },
+      });
+      await enqueueToUser({
+        recipientUserId: user.id,
+        idempotencyKey: `${event.providerMessageKey}:pause-after-match`,
+        body: voice.pauseAfterMatch(),
+        now: event.receivedAt,
+      });
+      return;
+    }
+
+    await prisma.user.updateMany({
+      where: { id: user.id, state: { not: "blocked" } },
+      data: { state: "paused", matchingEnabled: false },
+    });
+    await enqueueToUser({
+      recipientUserId: user.id,
+      idempotencyKey: `${event.providerMessageKey}:pause-confirmed`,
+      body: voice.pauseConfirmed(),
+      now: event.receivedAt,
+    });
+    return;
+  }
+
   if (command.kind === "leave") {
+    if (!(await canUserContinue(user.id))) return;
     if (!activeConnection) {
       await enqueueNoActiveMatch({ recipientUserId: user.id, event });
       return;
     }
-    await closeForLeave({
+    await enqueueToUser({
       connectionId: activeConnection.id,
-      actorUserId: user.id,
+      recipientUserId: user.id,
+      idempotencyKey: `${event.providerMessageKey}:leave-prompt`,
+      body: voice.leaveConfirmPrompt(),
       now: event.receivedAt,
     });
+    return;
+  }
+
+  if (command.kind === "confirm_leave") {
+    if (!(await canUserContinue(user.id))) return;
+    if (!activeConnection) {
+      await enqueueNoActiveMatch({ recipientUserId: user.id, event });
+      return;
+    }
+    try {
+      await closeForLeave({
+        connectionId: activeConnection.id,
+        actorUserId: user.id,
+        now: event.receivedAt,
+        notifications: {
+          actorIdempotencyKey: `${event.providerMessageKey}:leave-confirmed`,
+          actorBody: user.matchingEnabled ? voice.leaveConfirmed() : voice.leaveConfirmedPaused(),
+          peerIdempotencyKey: `${event.providerMessageKey}:peer-left`,
+          peerBody: voice.partnerLeft(),
+        },
+      });
+      await matchWaitingUsers({ now: event.receivedAt });
+    } catch (error) {
+      if (!isBlockedActorRejection(error)) throw error;
+    }
     return;
   }
 
   if (command.kind === "report") {
-    if (!activeConnection) {
+    if (!(await canUserContinue(user.id))) return;
+    const reportableConnection = activeConnection ?? await findLatestAwaitingEchoConnection(user.id);
+    if (!reportableConnection) {
       await enqueueNoActiveMatch({ recipientUserId: user.id, event });
       return;
     }
-    await reportConnection({
-      connectionId: activeConnection.id,
-      reporterUserId: user.id,
-      reason: command.reason,
-      now: event.receivedAt,
-    });
+    try {
+      await reportConnection({
+        connectionId: reportableConnection.id,
+        reporterUserId: user.id,
+        reason: command.reason,
+        now: event.receivedAt,
+        notifications: {
+          actorIdempotencyKey: `${event.providerMessageKey}:report-confirmed`,
+          actorBody: voice.reportConfirmed(),
+          peerIdempotencyKey: `${event.providerMessageKey}:peer-ended`,
+          peerBody: voice.peerEnded(),
+        },
+      });
+      await matchWaitingUsers({ now: event.receivedAt });
+    } catch (error) {
+      if (!isBlockedActorRejection(error)) throw error;
+    }
     return;
   }
 
   if (activeConnection) {
+    if (!(await canUserContinue(user.id))) return;
     await enqueueToUser({
       connectionId: activeConnection.id,
       recipientUserId: otherParticipantId(activeConnection, user.id),
       idempotencyKey: `${event.providerMessageKey}:relay`,
       body: command.text,
       now: event.receivedAt,
+      encryptBody: true,
     });
     return;
   }
 
-  const echoConnection = await findAwaitingEchoConnection(user.id);
-  if (echoConnection) {
-    try {
-      await submitEcho({
-        connectionId: echoConnection.id,
-        fromUserId: user.id,
-        body: command.text,
-        now: event.receivedAt,
-      });
-    } catch (error) {
-      if (!isExpectedEchoRejection(error)) throw error;
-    }
-    return;
-  }
-
+  if (!(await canUserContinue(user.id))) return;
   await enqueueNoActiveMatch({ recipientUserId: user.id, event });
+}
+
+async function canUserContinue(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { state: true },
+  });
+  return user?.state !== "blocked";
 }
 
 async function findActiveConnection(userId: string) {
@@ -226,7 +325,7 @@ async function findActiveConnection(userId: string) {
   });
 }
 
-async function findAwaitingEchoConnection(userId: string) {
+async function findLatestAwaitingEchoConnection(userId: string) {
   return prisma.connection.findFirst({
     where: {
       state: "awaiting_echo",
@@ -244,12 +343,52 @@ async function recordDuplicateInbound(providerMessageKey: string) {
 }
 
 async function enqueueNoActiveMatch(input: { recipientUserId: string; event: NormalizedInboundEvent }) {
+  const user = await prisma.user.findUnique({
+    where: { id: input.recipientUserId },
+    select: { state: true },
+  });
+  const closedConnection = await findLatestClosedConnection(input.recipientUserId);
   await enqueueToUser({
     recipientUserId: input.recipientUserId,
     idempotencyKey: `${input.event.providerMessageKey}:no-match`,
-    body: voice.unknown(),
+    body: noActiveMatchBody(user?.state, closedConnection?.closeReason),
     now: input.event.receivedAt,
   });
+}
+
+async function helpBodyForUser(userId: string): Promise<string> {
+  const activeConnection = await findActiveConnection(userId);
+  if (activeConnection) return voice.helpMatched();
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { state: true },
+  });
+  if (user?.state === "waiting" || user?.state === "available") return voice.helpWaiting();
+  if (user?.state === "cooldown") return voice.helpCooldown();
+  if (user?.state === "paused") return voice.helpPaused();
+
+  return voice.help();
+}
+
+async function findLatestClosedConnection(userId: string) {
+  return prisma.connection.findFirst({
+    where: {
+      state: "awaiting_echo",
+      OR: [{ userAId: userId }, { userBId: userId }],
+    },
+    orderBy: { closedAt: "desc" },
+    select: { closeReason: true },
+  });
+}
+
+function noActiveMatchBody(userState: UserState | undefined, closeReason: string | null | undefined): string {
+  if (userState === "waiting" || userState === "available") return voice.waitingStill();
+  if (userState === "cooldown" || closeReason === "left" || closeReason === "reported" || closeReason === "provider_expired") {
+    return voice.closedNoRelay();
+  }
+
+  return voice.unknown();
 }
 
 async function enqueueToUser(input: {
@@ -258,6 +397,7 @@ async function enqueueToUser(input: {
   idempotencyKey: string;
   body: string;
   now: Date;
+  encryptBody?: boolean;
 }) {
   await prisma.messageOutbox.upsert({
     where: { idempotencyKey: input.idempotencyKey },
@@ -265,7 +405,7 @@ async function enqueueToUser(input: {
       connectionId: input.connectionId,
       recipientUserId: input.recipientUserId,
       idempotencyKey: input.idempotencyKey,
-      bodyCiphertextOrBody: input.body,
+      bodyCiphertextOrBody: input.encryptBody ? encryptOutboxBody(input.body) : input.body,
       nextAttemptAt: input.now,
     },
     update: {},
@@ -287,6 +427,6 @@ function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
-function isExpectedEchoRejection(error: unknown): boolean {
-  return error instanceof Error && (error.message === "echo_already_submitted" || error.message === "echo_body_too_long");
+function isBlockedActorRejection(error: unknown): boolean {
+  return error instanceof Error && error.message === "actor_blocked";
 }

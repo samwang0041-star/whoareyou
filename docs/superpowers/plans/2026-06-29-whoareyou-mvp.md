@@ -297,8 +297,12 @@ describe("voice", () => {
       voice.help(),
     ].join("\n");
 
-    expect(copy).toContain("入口后面不是 AI");
+    expect(copy).toContain("扫码，遇见一个陌生人");
     expect(copy).toContain("你遇见了一个人");
+    expect(copy).not.toContain("入口后面不是 AI");
+    expect(copy).not.toContain("不是 AI，不是客服");
+    expect(copy).not.toContain("AI 入口");
+    expect(copy).not.toContain("真人相遇");
     expect(copy).not.toContain("匹配成功");
     expect(copy).not.toContain("状态已更新");
     expect(copy).not.toContain("会话已结束");
@@ -411,7 +415,7 @@ Create `src/domain/voice.ts`:
 ```ts
 export const voice = {
   webTitle: () => "你是谁",
-  webSubtitle: () => "扫码，遇见一个陌生人。\n这一次，入口后面不是 AI。",
+  webSubtitle: () => "扫码，遇见一个陌生人。\n把这个入口，留给一次不期而遇。",
   wechatEntry: () => "你来了。\n\n这一次，我不会回答你。\n我会带你遇见一个人。",
   waiting: () => "正在等另一个也停下来的人。",
   waitingFull: () => "你先到了一点。\n\n也许另一个人还在路上。\n你可以等一会儿，也可以发「暂停」先离开。",
@@ -2115,10 +2119,10 @@ export default function HomePage() {
   return (
     <main className="min-h-screen bg-[#120f1b] text-[#f6f0e8]">
       <section className="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6 py-16">
-        <p className="mb-6 text-sm text-[#b9a98f]">AI 入口里的真人相遇</p>
+        <p className="mb-6 text-sm text-[#b9a98f]">把下一句话，留给人</p>
         <h1 className="text-6xl font-normal tracking-normal sm:text-7xl">你是谁</h1>
         <p className="mt-8 whitespace-pre-line text-xl leading-9 text-[#efe5d7]">
-          扫码，遇见一个陌生人。{"\n"}这一次，入口后面不是 AI。
+          扫码，遇见一个陌生人。{"\n"}把这个入口，留给一次不期而遇。
         </p>
         <button
           className="mt-10 w-fit border border-[#f6f0e8]/50 px-6 py-3 text-base text-[#f6f0e8] transition hover:border-[#f6f0e8]"
@@ -2128,7 +2132,7 @@ export default function HomePage() {
         </button>
         {qrUrl ? (
           <div className="mt-8 border border-[#f6f0e8]/20 p-4 text-sm text-[#d7c7af]">
-            <p>请用微信打开这个入口：</p>
+            <p>请用微信扫码：</p>
             <p className="mt-2 break-all">{qrUrl}</p>
           </div>
         ) : null}
@@ -2136,8 +2140,7 @@ export default function HomePage() {
         <p className="mt-16 max-w-xl whitespace-pre-line text-base leading-8 text-[#b9a98f]">
           我们已经习惯扫码，接入一个又一个 agent。{"\n"}
           可这一次，请先停一下。{"\n"}
-          入口后面不是 AI。{"\n"}
-          是另一个也停下来的人。
+          你会遇见另一个也停下来的人。
         </p>
       </section>
     </main>

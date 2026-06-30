@@ -1,7 +1,18 @@
+import { createHash } from "node:crypto";
+import type { ConnectionState } from "@prisma/client";
+import { matchWaitingUsers } from "../domain/matching";
+import { decodeOutboxBody, encryptOutboxBody } from "../domain/outbox-body";
 import { isProviderWindowExpired } from "../domain/provider-policy";
+import { voice } from "../domain/voice";
 import { prisma } from "../storage/prisma";
+import { decryptProviderCredential } from "../adapters/openclaw-credentials";
+import { openClawWeixinProvider, sendOpenClawWeixinMessage } from "../adapters/openclaw-weixin-runtime";
+import { loadOpenClawOutboxConfig, loadProviderModeConfig } from "../config";
+import { recordAppError, recordWorkerHeartbeat } from "./admin-metrics";
 
+const activeConnectionStates: ConnectionState[] = ["active", "ending"];
 const staleSendingAfterMs = 5 * 60_000;
+const outboxWorkerName = "outbox";
 
 export type SendInput = {
   recipientUserId: string;
@@ -13,42 +24,131 @@ export type ProcessOutboxBatchInput = {
   now: Date;
   limit: number;
   maxRetries?: number;
-  send: (message: SendInput) => Promise<void>;
+  send?: (message: SendInput) => Promise<void>;
 };
 
 export async function processOutboxBatch(input: ProcessOutboxBatchInput) {
-  const maxRetries = input.maxRetries ?? envInt("OUTBOX_MAX_RETRIES", 3);
-  await recoverStaleSendingMessages(input.now);
+  try {
+    const maxRetries = input.maxRetries ?? envInt("OUTBOX_MAX_RETRIES", 3);
+    const send = input.send ?? resolveOutboxSend();
+    await recoverStaleSendingMessages(input.now);
 
-  const messages = await prisma.messageOutbox.findMany({
+    const messages = await prisma.messageOutbox.findMany({
+      where: {
+        status: { in: ["pending", "retrying"] },
+        nextAttemptAt: { lte: input.now },
+      },
+      select: { id: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: input.limit,
+    });
+
+    const result = { processed: 0, sent: 0, retried: 0, failed: 0, providerWindowExpired: 0 };
+
+    for (const message of messages) {
+      const outcome = await processOneOutboxMessage({
+        messageId: message.id,
+        now: input.now,
+        maxRetries,
+        send,
+      });
+      if (outcome === "skipped") continue;
+
+      result.processed += 1;
+      if (outcome === "sent") result.sent += 1;
+      if (outcome === "retried") result.retried += 1;
+      if (outcome === "failed") result.failed += 1;
+      if (outcome === "provider_window_expired") result.providerWindowExpired += 1;
+    }
+
+    if (result.providerWindowExpired > 0) {
+      await triggerWaitingMatching(input.now);
+    }
+
+    await recordWorkerHeartbeat({
+      workerName: outboxWorkerName,
+      status: "ok",
+      now: input.now,
+      metadata: result,
+    });
+    return result;
+  } catch (error) {
+    const fingerprint = await recordAppError({
+      source: outboxWorkerName,
+      error,
+      now: input.now,
+    });
+    await recordWorkerHeartbeat({
+      workerName: outboxWorkerName,
+      status: "error",
+      now: input.now,
+      metadata: { errorFingerprint: fingerprint },
+    });
+    throw error;
+  }
+}
+
+async function triggerWaitingMatching(now: Date) {
+  try {
+    await matchWaitingUsers({ now });
+  } catch (error) {
+    await recordAppError({
+      source: outboxWorkerName,
+      error,
+      now,
+      context: { phase: "waiting_match_trigger" },
+    });
+  }
+}
+
+export function resolveOutboxSend(): (message: SendInput) => Promise<void> {
+  return loadProviderModeConfig().PROVIDER_MODE === "openclaw" ? sendOpenClawOutboxMessage : sendFakeOutboxMessage;
+}
+
+async function sendFakeOutboxMessage(message: SendInput) {
+  console.log(JSON.stringify({ event: "fake-send", count: 1, messageHash: shortHash(message.idempotencyKey) }));
+}
+
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+export async function sendOpenClawOutboxMessage(message: SendInput) {
+  const config = loadOpenClawOutboxConfig();
+  const providerRef = await prisma.userProviderRef.findUnique({
     where: {
-      status: { in: ["pending", "retrying"] },
-      nextAttemptAt: { lte: input.now },
+      provider_userId: {
+        provider: openClawWeixinProvider,
+        userId: message.recipientUserId,
+      },
     },
-    select: { id: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    take: input.limit,
+    include: {
+      botSession: true,
+    },
   });
 
-  const result = { processed: 0, sent: 0, retried: 0, failed: 0, providerWindowExpired: 0 };
-
-  for (const message of messages) {
-    const outcome = await processOneOutboxMessage({
-      messageId: message.id,
-      now: input.now,
-      maxRetries,
-      send: input.send,
-    });
-    if (outcome === "skipped") continue;
-
-    result.processed += 1;
-    if (outcome === "sent") result.sent += 1;
-    if (outcome === "retried") result.retried += 1;
-    if (outcome === "failed") result.failed += 1;
-    if (outcome === "provider_window_expired") result.providerWindowExpired += 1;
+  if (!providerRef) {
+    throw new Error("openclaw_provider_ref_missing");
   }
-
-  return result;
+  const session = providerRef.botSession;
+  if (!session || session.status !== "confirmed" || !session.botTokenCiphertext) {
+    throw new Error("openclaw_bot_session_missing");
+  }
+  await sendOpenClawWeixinMessage({
+    baseUrl: session.baseUrl ?? config.OPENCLAW_WEIXIN_API_BASE_URL,
+    botToken: decryptProviderCredential(session.botTokenCiphertext, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
+    ilinkUserId: session.ilinkUserId
+      ? decryptProviderCredential(session.ilinkUserId, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET)
+      : null,
+    clientVersion: config.OPENCLAW_WEIXIN_CLIENT_VERSION,
+    timeoutMs: config.OPENCLAW_SEND_TIMEOUT_MS,
+    toUserId: decryptProviderCredential(providerRef.providerUserIdCiphertext, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
+    clientId: message.idempotencyKey,
+    text: message.body,
+    contextToken: providerRef.latestContextTokenCiphertext
+      ? decryptProviderCredential(providerRef.latestContextTokenCiphertext, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET)
+      : undefined,
+  });
 }
 
 type ProcessOneOutboxMessageInput = {
@@ -63,7 +163,15 @@ type ClaimResult =
   | { kind: "skipped" }
   | { kind: "failed" }
   | { kind: "provider_window_expired" }
-  | { kind: "send"; messageId: string; recipientUserId: string; retryCount: number; body: string; idempotencyKey: string };
+  | {
+      kind: "send";
+      messageId: string;
+      recipientUserId: string;
+      retryCount: number;
+      body: string;
+      bodyWasEncrypted: boolean;
+      idempotencyKey: string;
+    };
 
 async function processOneOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<OutboxOutcome> {
   const claim = await claimOutboxMessage(input);
@@ -82,12 +190,13 @@ async function processOneOutboxMessage(input: ProcessOneOutboxMessageInput): Pro
       retryCount: claim.retryCount + 1,
       maxRetries: input.maxRetries,
       body: claim.body,
+      bodyWasEncrypted: claim.bodyWasEncrypted,
       now: input.now,
     });
   }
 
-  await prisma.messageOutbox.update({
-    where: { id: claim.messageId },
+  const sent = await prisma.messageOutbox.updateMany({
+    where: { id: claim.messageId, status: "sending" },
     data: {
       status: "sent",
       sentAt: input.now,
@@ -96,6 +205,7 @@ async function processOneOutboxMessage(input: ProcessOneOutboxMessageInput): Pro
       providerWindowCheckedAt: input.now,
     },
   });
+  if (sent.count === 0) return "skipped";
   return "sent";
 }
 
@@ -124,12 +234,28 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
         idempotencyKey: true,
         bodyCiphertextOrBody: true,
         retryCount: true,
+        createdAt: true,
       },
     });
     if (!message) return { kind: "skipped" };
 
-    const body = message.bodyCiphertextOrBody;
-    if (!body) {
+    const storedBody = message.bodyCiphertextOrBody;
+    if (!storedBody) {
+      await tx.messageOutbox.update({
+        where: { id: message.id },
+        data: {
+          status: "failed",
+          failedAt: input.now,
+          bodyCiphertextOrBody: null,
+          bodyClearedAt: input.now,
+        },
+      });
+      return { kind: "failed" };
+    }
+    const decodedBody = decodeOutboxBody(storedBody);
+
+    const maxPendingSeconds = envOptionalPositiveInt("OUTBOX_BODY_MAX_PENDING_SECONDS");
+    if (maxPendingSeconds && message.createdAt <= addSeconds(input.now, -maxPendingSeconds)) {
       await tx.messageOutbox.update({
         where: { id: message.id },
         data: {
@@ -152,8 +278,20 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
         providerSendQuota: true,
       },
     });
-    if (!recipient || isProviderWindowExpired(input.now, recipient.reachableUntil) || recipient.providerSendQuota <= 0) {
-      await markProviderWindowExpired(tx, message.id, message.recipientUserId, input.now);
+    if (!recipient) {
+      await failClaimedMessage(tx, message.id, input.now);
+      return { kind: "failed" };
+    }
+    if (recipient.state === "blocked") {
+      await failClaimedMessage(tx, message.id, input.now);
+      return { kind: "failed" };
+    }
+    if (isProviderWindowExpired(input.now, recipient.reachableUntil) || recipient.providerSendQuota <= 0) {
+      await markProviderWindowExpired(tx, {
+        messageId: message.id,
+        recipientUserId: message.recipientUserId,
+        now: input.now,
+      });
       return { kind: "provider_window_expired" };
     }
 
@@ -171,7 +309,8 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
       messageId: message.id,
       recipientUserId: message.recipientUserId,
       retryCount: message.retryCount,
-      body,
+      body: decodedBody.body,
+      bodyWasEncrypted: decodedBody.encrypted,
       idempotencyKey: message.idempotencyKey,
     };
   });
@@ -183,28 +322,45 @@ async function markSendFailure(input: {
   retryCount: number;
   maxRetries: number;
   body: string;
+  bodyWasEncrypted: boolean;
   now: Date;
 }): Promise<OutboxOutcome> {
   const exhausted = input.retryCount >= input.maxRetries;
-  await prisma.$transaction([
-    prisma.messageOutbox.update({
-      where: { id: input.messageId },
+  const updated = await prisma.$transaction(async (tx) => {
+    const marked = await tx.messageOutbox.updateMany({
+      where: { id: input.messageId, status: "sending" },
       data: {
         status: exhausted ? "failed" : "retrying",
         retryCount: input.retryCount,
         nextAttemptAt: exhausted ? input.now : addSeconds(input.now, input.retryCount * 30),
         failedAt: exhausted ? input.now : null,
-        bodyCiphertextOrBody: exhausted ? null : input.body,
+        bodyCiphertextOrBody: exhausted ? null : input.bodyWasEncrypted ? encryptOutboxBody(input.body) : input.body,
         bodyClearedAt: exhausted ? input.now : null,
         providerWindowCheckedAt: null,
       },
-    }),
-    prisma.user.update({
+    });
+    if (marked.count === 0) return 0;
+
+    await tx.user.update({
       where: { id: input.recipientUserId },
       data: { providerSendQuota: { increment: 1 } },
-    }),
-  ]);
+    });
+    return marked.count;
+  });
+  if (updated === 0) return "skipped";
   return exhausted ? "failed" : "retried";
+}
+
+async function failClaimedMessage(tx: OutboxTransaction, messageId: string, now: Date) {
+  await tx.messageOutbox.updateMany({
+    where: { id: messageId, status: "sending" },
+    data: {
+      status: "failed",
+      failedAt: now,
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
+    },
+  });
 }
 
 async function recoverStaleSendingMessages(now: Date) {
@@ -254,22 +410,47 @@ async function recoverStaleSendingMessages(now: Date) {
 
 async function markProviderWindowExpired(
   tx: OutboxTransaction,
-  messageId: string,
-  recipientUserId: string,
-  now: Date,
+  input: {
+    messageId: string;
+    recipientUserId: string;
+    now: Date;
+  },
 ) {
-  await tx.messageOutbox.update({
-    where: { id: messageId },
-    data: {
-      status: "provider_window_expired",
-      providerWindowCheckedAt: now,
-      bodyCiphertextOrBody: null,
-      bodyClearedAt: now,
+  const connections = await tx.connection.findMany({
+    where: {
+      state: { in: activeConnectionStates },
+      OR: [{ userAId: input.recipientUserId }, { userBId: input.recipientUserId }],
     },
+    select: { id: true, userAId: true, userBId: true },
+  });
+
+  if (connections.length > 0) {
+    const connectionIds = connections.map((connection) => connection.id);
+    await tx.connection.updateMany({
+      where: {
+        id: { in: connectionIds },
+        state: { in: activeConnectionStates },
+      },
+      data: {
+        state: "awaiting_echo",
+        closeReason: "provider_expired",
+        closedAt: input.now,
+      },
+    });
+    await expireConnectionOutboxMessages(tx, connectionIds, input.now);
+    await moveReachablePeersToCooldown(tx, connections, input.recipientUserId, input.now);
+  }
+
+  await tx.messageOutbox.updateMany({
+    where: {
+      id: input.messageId,
+      status: { in: ["pending", "retrying", "sending"] },
+    },
+    data: providerWindowExpiredMessageUpdate(input.now),
   });
   await tx.user.updateMany({
     where: {
-      id: recipientUserId,
+      id: input.recipientUserId,
       state: { not: "blocked" },
     },
     data: {
@@ -279,6 +460,120 @@ async function markProviderWindowExpired(
   });
 }
 
+async function expireConnectionOutboxMessages(tx: OutboxTransaction, connectionIds: string[], now: Date) {
+  await tx.messageOutbox.updateMany({
+    where: {
+      connectionId: { in: connectionIds },
+      status: { in: ["pending", "retrying", "sending"] },
+    },
+    data: providerWindowExpiredMessageUpdate(now),
+  });
+}
+
+async function moveReachablePeersToCooldown(
+  tx: OutboxTransaction,
+  connections: { id: string; userAId: string; userBId: string }[],
+  unreachableUserId: string,
+  now: Date,
+) {
+  const peerIds = [
+    ...new Set(
+      connections.map((connection) => connection.userAId === unreachableUserId ? connection.userBId : connection.userAId),
+    ),
+  ];
+  if (peerIds.length === 0) return;
+
+  const peers = await tx.user.findMany({
+    where: {
+      id: { in: peerIds },
+      state: { not: "blocked" },
+    },
+    select: { id: true, reachableUntil: true, providerSendQuota: true },
+  });
+  const cooldownPeerIds = peers
+    .filter((peer) => !isProviderWindowExpired(now, peer.reachableUntil) && peer.providerSendQuota > 0)
+    .map((peer) => peer.id);
+  const unreachablePeerIds = peers
+    .filter((peer) => isProviderWindowExpired(now, peer.reachableUntil) || peer.providerSendQuota <= 0)
+    .map((peer) => peer.id);
+
+  if (unreachablePeerIds.length > 0) {
+    await tx.user.updateMany({
+      where: {
+        id: { in: unreachablePeerIds },
+        state: { not: "blocked" },
+        OR: [
+          { reachableUntil: { lte: now } },
+          { providerSendQuota: { lte: 0 } },
+        ],
+      },
+      data: { state: "unreachable", matchingEnabled: false },
+    });
+  }
+  if (cooldownPeerIds.length === 0) return;
+
+  await tx.user.updateMany({
+    where: {
+      id: { in: cooldownPeerIds },
+      state: { not: "blocked" },
+      reachableUntil: { gte: now },
+      providerSendQuota: { gt: 0 },
+    },
+    data: { state: "cooldown" },
+  });
+  const scheduledCooldownPeers = await tx.user.findMany({
+    where: {
+      id: { in: cooldownPeerIds },
+      state: "cooldown",
+      reachableUntil: { gte: now },
+      providerSendQuota: { gt: 0 },
+    },
+    select: { id: true },
+  });
+  const scheduledCooldownPeerIds = scheduledCooldownPeers.map((peer) => peer.id);
+  if (scheduledCooldownPeerIds.length === 0) return;
+
+  await tx.scheduledJob.createMany({
+    data: connections.flatMap((connection) => {
+      const peerId = connection.userAId === unreachableUserId ? connection.userBId : connection.userAId;
+      if (!scheduledCooldownPeerIds.includes(peerId)) return [];
+
+      return [{
+        connectionId: connection.id,
+        userId: peerId,
+        type: "cooldown_release" as const,
+        runAt: addSeconds(now, envInt("COOLDOWN_SECONDS", 60)),
+        idempotencyKey: `provider-expired:${connection.id}:cooldown-release:${peerId}`,
+      }];
+    }),
+    skipDuplicates: true,
+  });
+  await tx.messageOutbox.createMany({
+    data: connections.flatMap((connection) => {
+      const peerId = connection.userAId === unreachableUserId ? connection.userBId : connection.userAId;
+      if (!scheduledCooldownPeerIds.includes(peerId)) return [];
+
+      return [{
+        connectionId: connection.id,
+        recipientUserId: peerId,
+        idempotencyKey: `provider-expired:${connection.id}:peer-notice:${peerId}`,
+        bodyCiphertextOrBody: voice.closedNoRelay(),
+        nextAttemptAt: now,
+      }];
+    }),
+    skipDuplicates: true,
+  });
+}
+
+function providerWindowExpiredMessageUpdate(now: Date) {
+  return {
+    status: "provider_window_expired" as const,
+    providerWindowCheckedAt: now,
+    bodyCiphertextOrBody: null,
+    bodyClearedAt: now,
+  };
+}
+
 function addSeconds(date: Date, seconds: number): Date {
   return new Date(date.getTime() + seconds * 1000);
 }
@@ -286,6 +581,11 @@ function addSeconds(date: Date, seconds: number): Date {
 function envInt(name: string, fallback: number): number {
   const value = Number(process.env[name] ?? fallback);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function envOptionalPositiveInt(name: string): number | undefined {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 async function runOutboxWorkerLoop() {
@@ -301,9 +601,6 @@ async function runOutboxWorkerLoop() {
       await processOutboxBatch({
         now: new Date(),
         limit: envInt("SCHEDULED_JOB_BATCH_SIZE", 50),
-        send: async (message) => {
-          console.log(`fake-send:${message.recipientUserId}:${message.idempotencyKey}`);
-        },
       });
     } catch (error) {
       console.error(error);
@@ -322,9 +619,6 @@ if (require.main === module) {
     : processOutboxBatch({
         now: new Date(),
         limit: envInt("SCHEDULED_JOB_BATCH_SIZE", 50),
-        send: async (message) => {
-          console.log(`fake-send:${message.recipientUserId}:${message.idempotencyKey}`);
-        },
       });
   run.finally(() => prisma.$disconnect());
 }

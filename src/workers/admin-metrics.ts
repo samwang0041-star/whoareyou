@@ -1,4 +1,4 @@
-import type { UserState } from "@prisma/client";
+import type { Prisma, UserState } from "@prisma/client";
 import { prisma } from "../storage/prisma";
 
 export type AdminOverviewInput = {
@@ -40,6 +40,50 @@ export type AdminOverview = {
 };
 
 const entranceStates: UserState[] = ["available", "waiting"];
+
+export async function recordWorkerHeartbeat(input: {
+  workerName: string;
+  status: string;
+  now: Date;
+  metadata?: Record<string, unknown>;
+}) {
+  await prisma.workerHeartbeat.upsert({
+    where: { workerName: input.workerName },
+    create: {
+      workerName: input.workerName,
+      status: input.status,
+      lastSeenAt: input.now,
+      metadataJson: jsonOrUndefined(input.metadata),
+    },
+    update: {
+      status: input.status,
+      lastSeenAt: input.now,
+      metadataJson: jsonOrUndefined(input.metadata),
+    },
+  });
+}
+
+export async function recordAppError(input: {
+  source: string;
+  severity?: string;
+  error: unknown;
+  now: Date;
+  context?: Record<string, unknown>;
+}): Promise<string> {
+  const message = errorMessage(input.error);
+  const fingerprint = `${input.source}:${message}`;
+  await prisma.appError.create({
+    data: {
+      source: input.source,
+      severity: input.severity ?? "error",
+      fingerprint,
+      message,
+      contextJson: jsonOrUndefined(input.context),
+      createdAt: input.now,
+    },
+  });
+  return fingerprint;
+}
 
 export async function getAdminOverview(input: AdminOverviewInput): Promise<AdminOverview> {
   const recentSince = addMinutes(input.now, -10);
@@ -201,4 +245,13 @@ function rate(numerator: number, denominator: number): number {
 
 function startOfUtcDay(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message.slice(0, 500);
+  return "unknown_error";
+}
+
+function jsonOrUndefined(value: Record<string, unknown> | undefined): Prisma.InputJsonValue | undefined {
+  return value as Prisma.InputJsonValue | undefined;
 }

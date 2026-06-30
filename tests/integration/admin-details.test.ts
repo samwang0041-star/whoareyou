@@ -60,6 +60,7 @@ describe("admin detail metrics", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.useRealTimers();
   });
 
   it("returns anonymous connection detail without provider hashes, bodies, or idempotency keys", async () => {
@@ -264,7 +265,10 @@ describe("admin detail metrics", () => {
     expect(JSON.stringify(closedOnly)).not.toContain("list-closed");
   });
 
-  it("counts health signals for callbacks, outbox backlog, active errors, and worker heartbeats", async () => {
+  it("counts health signals for callbacks, outbox backlog, active errors, and expected worker heartbeats", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    vi.stubEnv("PROVIDER_MODE", "fake");
     const user = await createUser("health-user");
     await prisma.inboundDedupe.createMany({
       data: [
@@ -275,10 +279,34 @@ describe("admin detail metrics", () => {
     });
     await prisma.messageOutbox.createMany({
       data: [
-        { recipientUserId: user.id, idempotencyKey: "health-pending", status: "pending", nextAttemptAt: now },
-        { recipientUserId: user.id, idempotencyKey: "health-retrying-1", status: "retrying", nextAttemptAt: now },
-        { recipientUserId: user.id, idempotencyKey: "health-retrying-2", status: "retrying", nextAttemptAt: now },
-        { recipientUserId: user.id, idempotencyKey: "health-sending", status: "sending", nextAttemptAt: now },
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "health-pending",
+          status: "pending",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:55:00.000Z"),
+        },
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "health-retrying-1",
+          status: "retrying",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:58:00.000Z"),
+        },
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "health-retrying-2",
+          status: "retrying",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:59:00.000Z"),
+        },
+        {
+          recipientUserId: user.id,
+          idempotencyKey: "health-sending",
+          status: "sending",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:00:00.000Z"),
+        },
         { recipientUserId: user.id, idempotencyKey: "health-sent", status: "sent", nextAttemptAt: now },
         { recipientUserId: user.id, idempotencyKey: "health-failed", status: "failed", nextAttemptAt: now },
         {
@@ -301,7 +329,7 @@ describe("admin detail metrics", () => {
         {
           workerName: "outbox",
           status: "ok",
-          lastSeenAt: now,
+          lastSeenAt: new Date("2026-06-30T09:57:30.000Z"),
           metadataJson: {
             processed: 3,
             providerUserHash: "worker-provider-hash-should-not-appear",
@@ -311,8 +339,8 @@ describe("admin detail metrics", () => {
         },
         {
           workerName: "scheduled-jobs",
-          status: "lagging",
-          lastSeenAt: new Date("2026-06-30T09:55:00.000Z"),
+          status: "error",
+          lastSeenAt: new Date("2026-06-30T09:59:50.000Z"),
         },
       ],
     });
@@ -332,6 +360,8 @@ describe("admin detail metrics", () => {
         failed: 1,
         providerWindowExpired: 1,
         backlog: 4,
+        oldestPendingOrRetryingCreatedAt: "2026-06-30T09:55:00.000Z",
+        oldestPendingOrRetryingAgeSeconds: 300,
       },
       providerWindowExpiredCount: 1,
       activeAppErrors: 2,
@@ -340,20 +370,60 @@ describe("admin detail metrics", () => {
     expect(health.workerHeartbeats).toEqual([
       {
         workerName: "outbox",
-        status: "ok",
-        lastSeenAt: now.toISOString(),
+        status: "stale",
+        lastSeenAt: "2026-06-30T09:57:30.000Z",
+        secondsSinceLastSeen: 150,
         metadataPresent: true,
       },
       {
         workerName: "scheduled-jobs",
-        status: "lagging",
-        lastSeenAt: "2026-06-30T09:55:00.000Z",
+        status: "down",
+        lastSeenAt: "2026-06-30T09:59:50.000Z",
+        secondsSinceLastSeen: 10,
         metadataPresent: false,
       },
     ]);
     expect(JSON.stringify(health)).not.toContain("worker-provider-hash-should-not-appear");
     expect(JSON.stringify(health)).not.toContain("worker body should not appear");
     expect(JSON.stringify(health)).not.toContain("worker-idempotency-key-should-not-appear");
+  });
+
+  it("expects the OpenClaw updates worker only when provider mode is openclaw", async () => {
+    vi.stubEnv("PROVIDER_MODE", "openclaw");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    const health = await getHealthMetrics();
+
+    expect(health.workerHeartbeats.map((heartbeat) => heartbeat.workerName)).toEqual([
+      "openclaw-updates",
+      "outbox",
+      "scheduled-jobs",
+    ]);
+  });
+
+  it("treats a fresh running OpenClaw updates heartbeat as healthy", async () => {
+    vi.stubEnv("PROVIDER_MODE", "openclaw");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    await prisma.workerHeartbeat.create({
+      data: {
+        workerName: "openclaw-updates",
+        status: "running",
+        lastSeenAt: new Date("2026-06-30T09:59:40.000Z"),
+        metadataJson: { phase: "polling", processedSessions: 1 },
+      },
+    });
+
+    const health = await getHealthMetrics();
+
+    expect(health.workerHeartbeats.find((heartbeat) => heartbeat.workerName === "openclaw-updates")).toEqual({
+      workerName: "openclaw-updates",
+      status: "ok",
+      lastSeenAt: "2026-06-30T09:59:40.000Z",
+      secondsSinceLastSeen: 20,
+      metadataPresent: true,
+    });
   });
 
   it("counts safety reports, blocked users, close reasons, and near-block reported users", async () => {
