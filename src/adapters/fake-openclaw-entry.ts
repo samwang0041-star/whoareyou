@@ -19,6 +19,7 @@ export async function getFakeEntryQr(origin: string): Promise<EntryQrResponse> {
   await prisma.openClawBotSession.create({
     data: {
       qrcode: sessionId,
+      providerQrcodeHash: fakeQrSessionMarker(sessionId),
       status: "waiting_to_scan",
       expiresAt: new Date(expiresAt),
     },
@@ -44,4 +45,8 @@ export async function getFakeEntryQr(origin: string): Promise<EntryQrResponse> {
     },
     statusUrl: `${statusUrl.pathname}${statusUrl.search}`,
   };
+}
+
+export function fakeQrSessionMarker(sessionId: string): string {
+  return `fake:${sessionId}`;
 }

@@ -4,6 +4,7 @@ import { loadProviderModeConfig } from "../config";
 import { prisma } from "../storage/prisma";
 
 const connectionListLimit = 50;
+const connectionDetailChildLimit = 50;
 const nearBlockThreshold = 3;
 const nearBlockFloor = 2;
 const openClawUpdatesWorkerName = "openclaw-updates";
@@ -164,6 +165,7 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
       },
       outboxMessages: {
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: connectionDetailChildLimit,
         select: {
           id: true,
           recipientUserId: true,
@@ -179,6 +181,7 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
       },
       scheduledJobs: {
         orderBy: [{ runAt: "asc" }, { id: "asc" }],
+        take: connectionDetailChildLimit,
         select: {
           id: true,
           type: true,
@@ -192,6 +195,7 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
       },
       reports: {
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: connectionDetailChildLimit,
         select: {
           id: true,
           reporterUserId: true,
@@ -202,6 +206,7 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
       },
       echoes: {
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: connectionDetailChildLimit,
         select: {
           id: true,
           fromUserId: true,
@@ -220,6 +225,12 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
   });
 
   if (!connection) return null;
+
+  const outboxStatusCounts = await prisma.messageOutbox.groupBy({
+    by: ["status"],
+    where: { connectionId },
+    _count: { _all: true },
+  });
 
   const userIdToAnonymousId = new Map([
     [connection.userAId, anonymousUserId(connection.userA.providerUserHash)],
@@ -245,7 +256,7 @@ export async function getConnectionDetail(connectionId: string): Promise<Connect
       participant("A", connection.userA),
       participant("B", connection.userB),
     ],
-    outboxSummary: summarizeOutbox(connection.outboxMessages),
+    outboxSummary: summarizeOutboxCounts(groupCountMap(outboxStatusCounts, (row) => row.status)),
     outboxMessages: connection.outboxMessages.map((message) => ({
       id: message.id,
       recipientAnonymousId: anonymousIdForUser(userIdToAnonymousId, message.recipientUserId),
@@ -328,18 +339,28 @@ export async function listConnections(state?: ConnectionState): Promise<Connecti
 export async function getHealthMetrics(): Promise<HealthMetrics> {
   const now = new Date();
   const [
-    callbackRows,
+    callbackStatusRows,
     duplicateCallbacks,
-    outboxRows,
+    outboxStatusRows,
+    oldestPendingOrRetrying,
     activeAppErrors,
     activeErrorRows,
     workerHeartbeats,
   ] = await Promise.all([
-    prisma.inboundDedupe.findMany({ select: { status: true, duplicateCount: true } }),
+    prisma.inboundDedupe.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.inboundDedupe.aggregate({ _sum: { duplicateCount: true } }),
-    prisma.messageOutbox.findMany({ select: { status: true, createdAt: true } }),
+    prisma.messageOutbox.groupBy({ by: ["status"], _count: { _all: true } }),
+    prisma.messageOutbox.findFirst({
+      where: { status: { in: ["pending", "retrying"] } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { createdAt: true },
+    }),
     prisma.appError.count({ where: { resolvedAt: null } }),
-    prisma.appError.findMany({ where: { resolvedAt: null }, select: { severity: true } }),
+    prisma.appError.groupBy({
+      by: ["severity"],
+      where: { resolvedAt: null },
+      _count: { _all: true },
+    }),
     prisma.workerHeartbeat.findMany({
       orderBy: { workerName: "asc" },
       select: {
@@ -350,70 +371,62 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
       },
     }),
   ]);
-  const callbacksByStatus = countBy(callbackRows, (row) => row.status);
-  const outbox = summarizeHealthOutbox(outboxRows, now);
+  const callbacksByStatus = groupCountMap(callbackStatusRows, (row) => row.status);
+  const outbox = summarizeHealthOutboxCounts(groupCountMap(outboxStatusRows, (row) => row.status), oldestPendingOrRetrying, now);
   const normalizedWorkerHeartbeats = normalizeWorkerHeartbeats(workerHeartbeats, now, expectedWorkerNames());
 
   return {
     generatedAt: now.toISOString(),
-    callbacksTotal: callbackRows.length,
+    callbacksTotal: sumCounts(callbacksByStatus),
     callbackDuplicates: (callbacksByStatus.get("duplicate") ?? 0) + (duplicateCallbacks._sum.duplicateCount ?? 0),
     callbackFailed: callbacksByStatus.get("failed") ?? 0,
     callbacksByStatus: toSortedCountRows(callbacksByStatus, "status"),
     outbox,
     providerWindowExpiredCount: outbox.providerWindowExpired,
     activeAppErrors,
-    activeAppErrorsBySeverity: toSortedCountRows(countBy(activeErrorRows, (row) => row.severity), "severity"),
+    activeAppErrorsBySeverity: toSortedCountRows(groupCountMap(activeErrorRows, (row) => row.severity), "severity"),
     workerHeartbeatCount: normalizedWorkerHeartbeats.length,
     workerHeartbeats: normalizedWorkerHeartbeats,
   };
 }
 
 export async function getSafetyMetrics(): Promise<SafetyMetrics> {
-  const [reports, blockedUsers, closeReasonRows] = await Promise.all([
-    prisma.report.findMany({
-      select: {
-        reason: true,
-        reported: {
-          select: {
-            id: true,
-            providerUserHash: true,
-            state: true,
-          },
-        },
-      },
-    }),
+  const [totalReports, reportsByReasonRows, reportsByUserRows, blockedUsers, closeReasonRows] = await Promise.all([
+    prisma.report.count(),
+    prisma.report.groupBy({ by: ["reason"], _count: { _all: true } }),
+    prisma.report.groupBy({ by: ["reportedUserId"], _count: { _all: true } }),
     prisma.user.count({ where: { state: "blocked" } }),
-    prisma.connection.findMany({
+    prisma.connection.groupBy({
+      by: ["closeReason"],
       where: { closeReason: { not: null } },
-      select: { closeReason: true },
+      _count: { _all: true },
     }),
   ]);
 
-  const reportsByReason = countBy(reports, (report) => report.reason);
-  const reportsByUser = new Map<string, { anonymousId: string; reportCount: number; state: UserState }>();
-  for (const report of reports) {
-    const current = reportsByUser.get(report.reported.id);
-    reportsByUser.set(report.reported.id, {
-      anonymousId: anonymousUserId(report.reported.providerUserHash),
-      reportCount: (current?.reportCount ?? 0) + 1,
-      state: report.reported.state,
-    });
-  }
-  const nearBlockReportedUsers = Array.from(reportsByUser.values())
-    .filter((user) => user.state !== "blocked" && user.reportCount >= nearBlockFloor && user.reportCount < nearBlockThreshold)
-    .map((user) => ({ anonymousId: user.anonymousId, reportCount: user.reportCount }))
+  const nearBlockRows = reportsByUserRows.filter((row) => row._count._all >= nearBlockFloor && row._count._all < nearBlockThreshold);
+  const nearBlockUsers = nearBlockRows.length === 0
+    ? []
+    : await prisma.user.findMany({
+        where: {
+          id: { in: nearBlockRows.map((row) => row.reportedUserId) },
+          state: { not: "blocked" },
+        },
+        select: { id: true, providerUserHash: true },
+      });
+  const nearBlockCounts = new Map(nearBlockRows.map((row) => [row.reportedUserId, row._count._all]));
+  const nearBlockReportedUsers = nearBlockUsers
+    .map((user) => ({ anonymousId: anonymousUserId(user.providerUserHash), reportCount: nearBlockCounts.get(user.id) ?? 0 }))
     .sort((left, right) => right.reportCount - left.reportCount || left.anonymousId.localeCompare(right.anonymousId));
 
   return {
     generatedAt: new Date().toISOString(),
-    totalReports: reports.length,
+    totalReports,
     blockedUsers,
     nearBlockThreshold,
     nearBlockReportedUserCount: nearBlockReportedUsers.length,
     nearBlockReportedUsers,
-    reportsByReason: toSortedCountRows(reportsByReason, "reason"),
-    connectionCloseReasons: summarizeCloseReasons(closeReasonRows),
+    reportsByReason: toSortedCountRows(groupCountMap(reportsByReasonRows, (row) => row.reason), "reason"),
+    connectionCloseReasons: summarizeCloseReasonCounts(groupCountMap(closeReasonRows, (row) => row.closeReason ?? "")),
   };
 }
 
@@ -452,14 +465,13 @@ function anonymousIdForUser(userIdToAnonymousId: Map<string, string>, userId: st
   return userIdToAnonymousId.get(userId) ?? "u_unknown";
 }
 
-function summarizeOutbox(messages: Array<{ status: OutboxStatus }>): OutboxSummary {
-  const counts = countBy(messages, (message) => message.status);
+function summarizeOutboxCounts(counts: Map<string, number>): OutboxSummary {
   const pending = counts.get("pending") ?? 0;
   const retrying = counts.get("retrying") ?? 0;
   const sending = counts.get("sending") ?? 0;
 
   return {
-    total: messages.length,
+    total: sumCounts(counts),
     pending,
     retrying,
     sending,
@@ -470,14 +482,12 @@ function summarizeOutbox(messages: Array<{ status: OutboxStatus }>): OutboxSumma
   };
 }
 
-function summarizeHealthOutbox(
-  messages: Array<{ status: OutboxStatus; createdAt: Date }>,
+function summarizeHealthOutboxCounts(
+  counts: Map<string, number>,
+  oldestPendingOrRetrying: { createdAt: Date } | null,
   now: Date,
 ): HealthOutboxSummary {
-  const summary = summarizeOutbox(messages);
-  const oldestPendingOrRetrying = messages
-    .filter((message) => message.status === "pending" || message.status === "retrying")
-    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())[0];
+  const summary = summarizeOutboxCounts(counts);
 
   return {
     ...summary,
@@ -486,8 +496,7 @@ function summarizeHealthOutbox(
   };
 }
 
-function summarizeCloseReasons(rows: Array<{ closeReason: string | null }>): SafetyMetrics["connectionCloseReasons"] {
-  const counts = countBy(rows, (row) => row.closeReason ?? "");
+function summarizeCloseReasonCounts(counts: Map<string, number>): SafetyMetrics["connectionCloseReasons"] {
   return {
     timeout: counts.get("timeout") ?? 0,
     left: counts.get("left") ?? 0,
@@ -552,13 +561,16 @@ function envInt(name: string, fallback: number): number {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function countBy<T>(items: T[], getKey: (item: T) => string): Map<string, number> {
+function groupCountMap<T extends { _count: { _all: number } }>(items: T[], getKey: (item: T) => string): Map<string, number> {
   const counts = new Map<string, number>();
   for (const item of items) {
-    const key = getKey(item);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    counts.set(getKey(item), item._count._all);
   }
   return counts;
+}
+
+function sumCounts(counts: Map<string, number>): number {
+  return Array.from(counts.values()).reduce((total, count) => total + count, 0);
 }
 
 function toSortedCountRows<Key extends string>(

@@ -1,9 +1,17 @@
 import { NextResponse } from "next/server";
+import { requireAdmin } from "../../../../src/web/admin-auth";
 import { getAdminOverview } from "../../../../src/workers/admin-metrics";
 
 export async function GET(request: Request) {
-  if (!isAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const auth = requireAdmin(request);
+  if (!auth.ok) {
+    return NextResponse.json(
+      { error: auth.status === 429 ? "rate_limited" : "unauthorized" },
+      {
+        status: auth.status,
+        headers: auth.status === 429 ? { "Retry-After": String(auth.retryAfterSeconds) } : undefined,
+      },
+    );
   }
 
   const overview = await getAdminOverview({
@@ -13,17 +21,6 @@ export async function GET(request: Request) {
   });
 
   return NextResponse.json(overview);
-}
-
-function isAuthorized(request: Request): boolean {
-  const expectedToken = process.env.ADMIN_TOKEN;
-  if (!expectedToken) return false;
-
-  const authorization = request.headers.get("authorization");
-  if (!authorization) return false;
-
-  const [scheme, token] = authorization.split(/\s+/, 2);
-  return scheme.toLowerCase() === "bearer" && token === expectedToken;
 }
 
 function envPositiveInt(name: string, fallback: number): number {

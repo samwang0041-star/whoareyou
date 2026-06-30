@@ -4,10 +4,25 @@ import { fakeOpenClaw, handleFakeInbound } from "../../../../src/adapters/fake-o
 import { loadProviderModeConfig } from "../../../../src/config";
 import { prisma } from "../../../../src/storage/prisma";
 import { recordAppError } from "../../../../src/workers/admin-metrics";
+import { enforceRateLimit } from "../../../../src/web/rate-limit";
 
 export async function GET(request: Request) {
   if (loadProviderModeConfig().PROVIDER_MODE !== "fake") {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+
+  const rateLimited = enforceRateLimit(
+    request,
+    process.env.RATE_LIMIT_FAKE_CALLBACK_PER_WINDOW,
+    process.env.RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS,
+    10,
+    60_000,
+  );
+  if (!rateLimited.allowed) {
+    return NextResponse.json({ error: "rate_limited" }, {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rateLimited.retryAfterMs / 1000)) },
+    });
   }
 
   const { searchParams } = new URL(request.url);
@@ -63,18 +78,63 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
+  const rateLimited = enforceRateLimit(
+    request,
+    process.env.RATE_LIMIT_FAKE_CALLBACK_PER_WINDOW,
+    process.env.RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS,
+    10,
+    60_000,
+  );
+  if (!rateLimited.allowed) {
+    return NextResponse.json({ error: "rate_limited" }, {
+      status: 429,
+      headers: { "Retry-After": String(Math.ceil(rateLimited.retryAfterMs / 1000)) },
+    });
+  }
+
   try {
-    const body = await request.json();
+    const body = await readBoundedJson(request, envInt("FAKE_CALLBACK_MAX_BODY_BYTES", 16 * 1024));
     const event = fakeOpenClaw.parseInbound(body);
     const result = await handleFakeInbound(event);
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
+    }
     if (error instanceof SyntaxError || error instanceof ZodError) {
       await recordInvalidPayload(error);
       return NextResponse.json({ error: "invalid_payload" }, { status: 400 });
     }
     throw error;
   }
+}
+
+async function readBoundedJson(request: Request, maxBytes: number): Promise<unknown> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const parsedLength = Number(contentLength);
+    if (Number.isFinite(parsedLength) && parsedLength > maxBytes) {
+      throw new PayloadTooLargeError();
+    }
+  }
+
+  const raw = await request.text();
+  if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+    throw new PayloadTooLargeError();
+  }
+
+  return JSON.parse(raw);
+}
+
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super("payload_too_large");
+  }
+}
+
+function envInt(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 async function recordInvalidPayload(error: SyntaxError | ZodError) {

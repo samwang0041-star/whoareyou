@@ -12,8 +12,8 @@ import { prisma } from "../storage/prisma";
 import { getFakeEntryQr } from "./fake-openclaw-entry";
 import type { OpenClawAdapter } from "./openclaw";
 
-const NonEmptyStringSchema = z.union([z.string(), z.number()]).transform(String).pipe(z.string().min(1));
-const TextSchema = z.union([z.string(), z.number()]).transform(String);
+const NonEmptyStringSchema = z.union([z.string(), z.number()]).transform(String).pipe(z.string().min(1).max(256));
+const TextSchema = z.union([z.string(), z.number()]).transform(String).pipe(z.string().max(2_000));
 const ReceivedAtSchema = z
   .union([z.string(), z.date()])
   .transform((value) => new Date(value))

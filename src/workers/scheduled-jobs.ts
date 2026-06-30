@@ -94,6 +94,24 @@ async function processScheduledJobsBatch(input: ProcessScheduledJobsInput) {
 
     result.processed += 1;
     try {
+      const claimedJob = await prisma.scheduledJob.findUnique({
+        where: { id: job.id },
+        select: { type: true },
+      });
+      if (!claimedJob) continue;
+      if (claimedJob.type === "metric_snapshot") {
+        await processMetricSnapshotJob(prisma, input.now);
+        await prisma.scheduledJob.update({
+          where: { id: job.id },
+          data: {
+            status: "completed",
+            completedAt: input.now,
+          },
+        });
+        result.completed += 1;
+        continue;
+      }
+
       const completedJob = await prisma.$transaction(async (tx) => {
         const freshJob = await tx.scheduledJob.findUnique({
           where: { id: job.id },
@@ -112,8 +130,8 @@ async function processScheduledJobsBatch(input: ProcessScheduledJobsInput) {
           releasedCapacity = await processReachabilityRenewalJob(tx, freshJob.idempotencyKey, freshJob.userId, input.now, input.cooldownSeconds);
         } else if (freshJob.type === "outbox_body_cleanup") {
           await processOutboxBodyCleanupJob(tx, input.now, input.bodyTtlSeconds ?? envInt("OUTBOX_BODY_TTL_SECONDS", 900));
-        } else if (freshJob.type === "metric_snapshot") {
-          await processMetricSnapshotJob(tx, input.now);
+        } else if (freshJob.type === "entity_cleanup") {
+          await processEntityCleanupJob(tx, input.now);
         }
 
         await tx.scheduledJob.update({
@@ -177,19 +195,26 @@ async function triggerWaitingMatching(now: Date) {
 }
 
 async function seedOperationalJobs(now: Date) {
-  const runAt = nextOperationalRunAt(now, envInt("OPERATIONAL_JOB_INTERVAL_SECONDS", 60));
+  const operationalInterval = envInt("OPERATIONAL_JOB_INTERVAL_SECONDS", 60);
+  const operationalRunAt = nextOperationalRunAt(now, operationalInterval);
+  const operationalJobs = ["metric_snapshot", "outbox_body_cleanup"] as const;
+
+  const cleanupInterval = envInt("ENTITY_CLEANUP_INTERVAL_SECONDS", 6 * 60 * 60);
+  const cleanupRunAt = nextOperationalRunAt(now, cleanupInterval);
+  const cleanupJobs = ["entity_cleanup"] as const;
+
   await prisma.scheduledJob.createMany({
     data: [
-      {
-        type: "metric_snapshot",
-        runAt,
-        idempotencyKey: `operational:metric_snapshot:${runAt.toISOString()}`,
-      },
-      {
-        type: "outbox_body_cleanup",
-        runAt,
-        idempotencyKey: `operational:outbox_body_cleanup:${runAt.toISOString()}`,
-      },
+      ...operationalJobs.map((type) => ({
+        type,
+        runAt: operationalRunAt,
+        idempotencyKey: `operational:${type}:${operationalRunAt.toISOString()}`,
+      })),
+      ...cleanupJobs.map((type) => ({
+        type,
+        runAt: cleanupRunAt,
+        idempotencyKey: `operational:${type}:${cleanupRunAt.toISOString()}`,
+      })),
     ],
     skipDuplicates: true,
   });
@@ -428,7 +453,91 @@ async function processOutboxBodyCleanupJob(tx: ScheduledJobTransaction, now: Dat
   });
 }
 
-async function processMetricSnapshotJob(tx: ScheduledJobTransaction, now: Date) {
+const entityCleanupBatchSize = 500;
+const cleanableSessionStatuses = ["expired", "superseded", "provider_error"];
+
+type EntityCleanupConfig = {
+  sessionRetentionHours: number;
+  inboundDedupeRetentionHours: number;
+  appErrorRetentionHours: number;
+  rateLimitRetentionHours: number;
+};
+
+async function processEntityCleanupJob(tx: ScheduledJobTransaction, now: Date) {
+  const config: EntityCleanupConfig = {
+    sessionRetentionHours: envInt("ENTITY_CLEANUP_SESSION_RETENTION_HOURS", 24),
+    inboundDedupeRetentionHours: envInt("ENTITY_CLEANUP_INBOUND_DEDUPE_RETENTION_HOURS", 24 * 7),
+    appErrorRetentionHours: envInt("ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS", 24 * 30),
+    rateLimitRetentionHours: envInt("ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS", 24 * 7),
+  };
+
+  await deleteExpiredSessions(tx, now, config.sessionRetentionHours);
+  await deleteOldInboundDedupe(tx, now, config.inboundDedupeRetentionHours);
+  await deleteResolvedAppErrors(tx, now, config.appErrorRetentionHours);
+  await deleteOldRateLimitEvents(tx, now, config.rateLimitRetentionHours);
+}
+
+async function deleteExpiredSessions(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
+  const cutoff = addSeconds(now, -retentionHours * 60 * 60);
+  const expired = await tx.openClawBotSession.findMany({
+    where: {
+      status: { in: cleanableSessionStatuses },
+      updatedAt: { lt: cutoff },
+    },
+    select: { id: true },
+    take: entityCleanupBatchSize,
+  });
+  if (expired.length === 0) return;
+  await tx.openClawBotSession.deleteMany({
+    where: { id: { in: expired.map((row) => row.id) } },
+  });
+}
+
+async function deleteOldInboundDedupe(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
+  const cutoff = addSeconds(now, -retentionHours * 60 * 60);
+  const oldRows = await tx.inboundDedupe.findMany({
+    where: { receivedAt: { lt: cutoff } },
+    select: { id: true },
+    take: entityCleanupBatchSize,
+  });
+  if (oldRows.length === 0) return;
+  await tx.inboundDedupe.deleteMany({
+    where: { id: { in: oldRows.map((row) => row.id) } },
+  });
+}
+
+async function deleteResolvedAppErrors(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
+  const cutoff = addSeconds(now, -retentionHours * 60 * 60);
+  const resolved = await tx.appError.findMany({
+    where: {
+      resolvedAt: { not: null, lt: cutoff },
+    },
+    select: { id: true },
+    take: entityCleanupBatchSize,
+  });
+  if (resolved.length === 0) return;
+  await tx.appError.deleteMany({
+    where: { id: { in: resolved.map((row) => row.id) } },
+  });
+}
+
+async function deleteOldRateLimitEvents(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
+  const cutoff = addSeconds(now, -retentionHours * 60 * 60);
+  const oldEvents = await tx.rateLimitEvent.findMany({
+    where: { createdAt: { lt: cutoff } },
+    select: { id: true },
+    take: entityCleanupBatchSize,
+  });
+  if (oldEvents.length === 0) return;
+  await tx.rateLimitEvent.deleteMany({
+    where: { id: { in: oldEvents.map((row) => row.id) } },
+  });
+}
+
+async function processMetricSnapshotJob(
+  tx: Pick<typeof prisma, "appError" | "messageOutbox" | "metricSnapshot" | "user">,
+  now: Date,
+) {
   const bucketStart = startOfUtcHour(now);
   const overview = await getAdminOverview({
     now,

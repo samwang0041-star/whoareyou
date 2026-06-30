@@ -212,7 +212,7 @@ Build:
 ```bash
 npm ci
 DATABASE_URL='postgresql://...' npx prisma generate
-DATABASE_URL='postgresql://...' ADMIN_TOKEN='...' PROVIDER_USER_HASH_SECRET='...' PROVIDER_CREDENTIAL_ENCRYPTION_SECRET='...' npm run build
+DATABASE_URL='postgresql://...' npm run build
 DATABASE_URL='postgresql://...' npm run db:migrate
 ```
 
@@ -237,7 +237,7 @@ npm run lint
 DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npm run typecheck
 DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npm test
 DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' ADMIN_TOKEN='dev-admin-token' PROVIDER_USER_HASH_SECRET='dev-provider-user-hash-secret' PROVIDER_CREDENTIAL_ENCRYPTION_SECRET='dev-provider-credential-encryption-secret' npm run test:e2e
-DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' ADMIN_TOKEN='dev-admin-token' PROVIDER_USER_HASH_SECRET='dev-provider-user-hash-secret' PROVIDER_CREDENTIAL_ENCRYPTION_SECRET='dev-provider-credential-encryption-secret' npm run build
+DATABASE_URL='postgresql://yuriwong@localhost:5432/whoareyou' npm run build
 ```
 
 Database-backed tests share one PostgreSQL database. Run separate Vitest processes sequentially, not in parallel.

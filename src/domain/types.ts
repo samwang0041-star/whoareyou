@@ -30,7 +30,8 @@ export type ScheduledJobType =
   | "reachability_renewal_prompt"
   | "cooldown_release"
   | "outbox_body_cleanup"
-  | "metric_snapshot";
+  | "metric_snapshot"
+  | "entity_cleanup";
 
 export type Command = "open" | "continue" | "pause" | "leave" | "report" | "help" | "message";
 

@@ -374,6 +374,7 @@ async function recoverStaleSendingMessages(now: Date) {
       id: true,
     },
     orderBy: [{ nextAttemptAt: "asc" }, { id: "asc" }],
+    take: envInt("OUTBOX_STALE_RECOVERY_BATCH_SIZE", 50),
   });
 
   for (const message of staleMessages) {

@@ -7,6 +7,7 @@ import { hashProviderUserId } from "../../src/domain/identity";
 import { decodeOutboxBody } from "../../src/domain/outbox-body";
 import { voice } from "../../src/domain/voice";
 import { prisma } from "../../src/storage/prisma";
+import { resetRateLimitsForTest } from "../../src/web/rate-limit";
 import { processScheduledJobs } from "../../src/workers/scheduled-jobs";
 
 const now = new Date("2026-06-30T10:00:00.000Z");
@@ -101,12 +102,14 @@ async function releaseCooldownFor(providerUserId: string, releasedAt = new Date(
 
 describe("fake OpenClaw callback", () => {
   beforeEach(async () => {
+    resetRateLimitsForTest();
     await cleanDatabase();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     setAfterInboundUserLoadHookForTest(null);
+    resetRateLimitsForTest();
   });
 
   it("parses fake inbound and exposes a fake QR entry session", async () => {
@@ -136,6 +139,33 @@ describe("fake OpenClaw callback", () => {
     expect(qr.qr.imageSrc).toMatch(/^data:image\/png;base64,/);
     expect(qr.qr.payloadUrl).toContain("/api/wechat/callback?fake=1");
     expect(qr.statusUrl).toContain("/api/qr/status?sessionId=");
+  });
+
+  it("rejects a client-forced OpenClaw status check for a fake QR session", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider_fetch_should_not_run");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const qrResponse = await getQr(
+      new Request("http://local.test/api/qr", {
+        headers: { "x-forwarded-for": "203.0.113.42" },
+      }),
+    );
+    const qr = await qrResponse.json();
+
+    const statusResponse = await getQrStatus(
+      new Request(`http://local.test/api/qr/status?mode=openclaw&sessionId=${qr.sessionId}&expiresAt=${encodeURIComponent(qr.expiresAt)}`, {
+        headers: { "x-forwarded-for": "203.0.113.42" },
+      }),
+    );
+
+    expect(statusResponse.status).toBe(400);
+    await expect(statusResponse.json()).resolves.toEqual({ error: "qr_mode_mismatch" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(prisma.openClawBotSession.findUniqueOrThrow({ where: { qrcode: qr.sessionId } })).resolves.toMatchObject({
+      status: "waiting_to_scan",
+      providerError: null,
+    });
   });
 
   it("confirms a fake QR session when the payload URL is scanned", async () => {
@@ -1124,5 +1154,22 @@ describe("fake OpenClaw callback", () => {
       contextJson: { reason: "schema_validation" },
     });
     expect(JSON.stringify(appError)).not.toContain(rawPayloadText);
+  });
+
+  it("rejects oversized fake callback payloads before JSON parsing", async () => {
+    await withEnv({ FAKE_CALLBACK_MAX_BODY_BYTES: "100" }, async () => {
+      const response = await postCallback(
+        new Request("http://local.test/api/wechat/callback", {
+          method: "POST",
+          headers: { "content-length": "101" },
+          body: JSON.stringify({}),
+        }),
+      );
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toEqual({ error: "payload_too_large" });
+      await expect(prisma.inboundDedupe.count()).resolves.toBe(0);
+      await expect(prisma.appError.count()).resolves.toBe(0);
+    });
   });
 });

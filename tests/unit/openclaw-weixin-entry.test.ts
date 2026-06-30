@@ -129,7 +129,15 @@ describe("openclaw weixin entry", () => {
         ...productionEnv,
         ALLOW_FAKE_PROVIDER: "1",
       }),
-    ).not.toThrow();
+    ).toThrow("ALLOW_FAKE_PROVIDER must not be set in production");
+    expect(() =>
+      loadQrProviderConfig({
+        ...productionEnv,
+        PROVIDER_MODE: "openclaw",
+        PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: "test-provider-credential-encryption-secret",
+        ALLOW_FAKE_PROVIDER: "1",
+      }),
+    ).toThrow("ALLOW_FAKE_PROVIDER must not be set in production");
   });
 
   it("maps Weixin scan status into the app status contract", async () => {

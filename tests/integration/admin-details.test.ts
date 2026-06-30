@@ -59,6 +59,7 @@ describe("admin detail metrics", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.useRealTimers();
   });
@@ -265,6 +266,33 @@ describe("admin detail metrics", () => {
     expect(JSON.stringify(closedOnly)).not.toContain("list-closed");
   });
 
+  it("limits connection detail child lists while preserving aggregate counts", async () => {
+    const userA = await createUser("detail-limit-a");
+    const userB = await createUser("detail-limit-b");
+    const connection = await createConnection(userA.id, userB.id, { state: "active" });
+    await prisma.messageOutbox.createMany({
+      data: Array.from({ length: 55 }, (_, index) => ({
+        connectionId: connection.id,
+        recipientUserId: index % 2 === 0 ? userA.id : userB.id,
+        idempotencyKey: `detail-limit-outbox-${index}`,
+        bodyCiphertextOrBody: `body ${index}`,
+        status: "pending" as const,
+        nextAttemptAt: now,
+        createdAt: new Date(now.getTime() + index),
+      })),
+    });
+
+    const detail = await getConnectionDetail(connection.id);
+
+    expect(detail).not.toBeNull();
+    if (!detail) throw new Error("expected connection detail");
+    expect(detail.outboxMessageCount).toBe(55);
+    expect(detail.outboxSummary).toMatchObject({ total: 55, pending: 55, backlog: 55 });
+    expect(detail.outboxMessages).toHaveLength(50);
+    expect(detail.outboxMessages[0]).toMatchObject({ status: "pending" });
+    expect(JSON.stringify(detail)).not.toContain("body 54");
+  });
+
   it("counts health signals for callbacks, outbox backlog, active errors, and expected worker heartbeats", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -386,6 +414,42 @@ describe("admin detail metrics", () => {
     expect(JSON.stringify(health)).not.toContain("worker-provider-hash-should-not-appear");
     expect(JSON.stringify(health)).not.toContain("worker body should not appear");
     expect(JSON.stringify(health)).not.toContain("worker-idempotency-key-should-not-appear");
+  });
+
+  it("computes health metrics with database aggregates instead of full-table materialization", async () => {
+    vi.stubEnv("PROVIDER_MODE", "fake");
+    const user = await createUser("health-aggregate-user");
+    await prisma.inboundDedupe.createMany({
+      data: [
+        { providerMessageKey: "aggregate-processed", status: "processed", receivedAt: now, duplicateCount: 2 },
+        { providerMessageKey: "aggregate-failed", status: "failed", receivedAt: now },
+      ],
+    });
+    await prisma.messageOutbox.createMany({
+      data: [
+        { recipientUserId: user.id, idempotencyKey: "aggregate-pending", status: "pending", nextAttemptAt: now, createdAt: now },
+        { recipientUserId: user.id, idempotencyKey: "aggregate-retrying", status: "retrying", nextAttemptAt: now, createdAt: new Date(now.getTime() - 60_000) },
+      ],
+    });
+    const inboundFindMany = vi.spyOn(prisma.inboundDedupe, "findMany").mockRejectedValue(new Error("inbound_full_scan_forbidden"));
+    const outboxFindMany = vi.spyOn(prisma.messageOutbox, "findMany").mockRejectedValue(new Error("outbox_full_scan_forbidden"));
+
+    const health = await getHealthMetrics();
+
+    expect(inboundFindMany).not.toHaveBeenCalled();
+    expect(outboxFindMany).not.toHaveBeenCalled();
+    expect(health).toMatchObject({
+      callbacksTotal: 2,
+      callbackDuplicates: 2,
+      callbackFailed: 1,
+      outbox: {
+        total: 2,
+        pending: 1,
+        retrying: 1,
+        backlog: 2,
+        oldestPendingOrRetryingCreatedAt: "2026-06-30T09:59:00.000Z",
+      },
+    });
   });
 
   it("expects the OpenClaw updates worker only when provider mode is openclaw", async () => {

@@ -14,6 +14,10 @@ async function cleanDatabase() {
   await prisma.report.deleteMany();
   await prisma.scheduledJob.deleteMany();
   await prisma.messageOutbox.deleteMany();
+  await prisma.rateLimitEvent.deleteMany();
+  await prisma.inboundDedupe.deleteMany();
+  await prisma.userProviderRef.deleteMany();
+  await prisma.openClawBotSession.deleteMany();
   await prisma.pairBlock.deleteMany();
   await prisma.connection.deleteMany();
   await prisma.user.deleteMany();
@@ -83,6 +87,12 @@ describe("scheduled jobs", () => {
     });
     expect(jobs).toEqual([
       {
+        type: "entity_cleanup",
+        status: "pending",
+        runAt: new Date("2026-06-30T12:00:00.000Z"),
+        idempotencyKey: "operational:entity_cleanup:2026-06-30T12:00:00.000Z",
+      },
+      {
         type: "metric_snapshot",
         status: "pending",
         runAt: new Date("2026-06-30T10:01:00.000Z"),
@@ -111,6 +121,11 @@ describe("scheduled jobs", () => {
     });
     expect(jobs).toEqual([
       {
+        type: "entity_cleanup",
+        runAt: new Date("2026-06-30T12:00:00.000Z"),
+        idempotencyKey: "operational:entity_cleanup:2026-06-30T12:00:00.000Z",
+      },
+      {
         type: "metric_snapshot",
         runAt: new Date("2026-06-30T10:01:00.000Z"),
         idempotencyKey: "operational:metric_snapshot:2026-06-30T10:01:00.000Z",
@@ -121,6 +136,93 @@ describe("scheduled jobs", () => {
         idempotencyKey: "operational:outbox_body_cleanup:2026-06-30T10:01:00.000Z",
       },
     ]);
+  });
+
+  it("entity_cleanup deletes expired sessions, old inbound dedupe, resolved app errors, and old rate limit events", async () => {
+    await withEnv(
+      {
+        ENTITY_CLEANUP_SESSION_RETENTION_HOURS: "24",
+        ENTITY_CLEANUP_INBOUND_DEDUPE_RETENTION_HOURS: "24",
+        ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS: "24",
+        ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS: "24",
+      },
+      async () => {
+        const staleSessionCutoff = new Date("2026-06-28T10:00:00.000Z");
+        const recentSessionCutoff = new Date("2026-06-30T09:30:00.000Z");
+        await prisma.openClawBotSession.create({
+          data: {
+            qrcode: "cleanup-expired-session",
+            status: "expired",
+            expiresAt: staleSessionCutoff,
+            updatedAt: staleSessionCutoff,
+          },
+        });
+        await prisma.openClawBotSession.create({
+          data: {
+            qrcode: "cleanup-active-session",
+            status: "waiting_to_scan",
+            expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+            updatedAt: recentSessionCutoff,
+          },
+        });
+        await prisma.inboundDedupe.create({
+          data: {
+            providerMessageKey: "cleanup-old-inbound",
+            receivedAt: staleSessionCutoff,
+            status: "processed",
+          },
+        });
+        await prisma.inboundDedupe.create({
+          data: {
+            providerMessageKey: "cleanup-fresh-inbound",
+            receivedAt: now,
+            status: "processed",
+          },
+        });
+        await prisma.appError.create({
+          data: {
+            source: "test",
+            severity: "error",
+            fingerprint: "test:resolved-old",
+            message: "resolved old error",
+            resolvedAt: staleSessionCutoff,
+            createdAt: staleSessionCutoff,
+          },
+        });
+        await prisma.appError.create({
+          data: {
+            source: "test",
+            severity: "error",
+            fingerprint: "test:unresolved",
+            message: "unresolved error",
+            createdAt: now,
+          },
+        });
+        await prisma.rateLimitEvent.create({
+          data: { userId: "ignored", eventType: "cleanup-old-event", createdAt: staleSessionCutoff },
+        });
+        await prisma.rateLimitEvent.create({
+          data: { userId: "ignored", eventType: "cleanup-fresh-event", createdAt: now },
+        });
+
+        await prisma.scheduledJob.create({
+          data: { type: "entity_cleanup", runAt: now, idempotencyKey: "test-entity-cleanup" },
+        });
+        await processScheduledJobs({ now, limit: 10, cooldownSeconds: 60 });
+
+        const remainingSessions = await prisma.openClawBotSession.findMany({ select: { qrcode: true } });
+        expect(remainingSessions.map((row) => row.qrcode).sort()).toEqual(["cleanup-active-session"]);
+
+        const remainingInbound = await prisma.inboundDedupe.findMany({ select: { providerMessageKey: true } });
+        expect(remainingInbound.map((row) => row.providerMessageKey).sort()).toEqual(["cleanup-fresh-inbound"]);
+
+        const remainingErrors = await prisma.appError.findMany({ select: { fingerprint: true } });
+        expect(remainingErrors.map((row) => row.fingerprint).sort()).toEqual(["test:unresolved"]);
+
+        const remainingEvents = await prisma.rateLimitEvent.findMany({ select: { eventType: true } });
+        expect(remainingEvents.map((row) => row.eventType).sort()).toEqual(["cleanup-fresh-event"]);
+      },
+    );
   });
 
   it("creates reminder outbox messages for every reminder and sets ending at 50 minutes", async () => {

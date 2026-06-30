@@ -664,6 +664,77 @@ describe("openclaw weixin runtime contract", () => {
     );
   });
 
+  it("advances the getupdates cursor when one inbound message is quarantined", async () => {
+    await prisma.openClawBotSession.create({
+      data: {
+        qrcode: "qr-session",
+        status: "confirmed",
+        botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
+        getUpdatesBuf: encryptProviderCredential("previous-buffer", testCredentialKey),
+        expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+      },
+    });
+
+    const handled: string[] = [];
+    await withEnv(
+      {
+        PROVIDER_MODE: "openclaw",
+        PROVIDER_USER_HASH_SECRET: testProviderHashKey,
+        PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: testCredentialKey,
+        PROVIDER_REPLY_WINDOW_HOURS: "24",
+        PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE: "999",
+      },
+      () =>
+        processOpenClawUpdatesBatch({
+          now,
+          limit: 10,
+          fetchUpdates: async () => ({
+            nextGetUpdatesBuf: "next-buffer",
+            messages: [
+              {
+                event: {
+                  providerMessageKey: "openclaw-weixin:qr-session:poison",
+                  providerUserId: "provider-user-poison",
+                  text: "打开",
+                  receivedAt: now,
+                },
+              },
+              {
+                event: {
+                  providerMessageKey: "openclaw-weixin:qr-session:later",
+                  providerUserId: "provider-user-later",
+                  text: "帮助",
+                  receivedAt: now,
+                },
+              },
+            ],
+          }),
+          handleInbound: async (event) => {
+            if (event.providerMessageKey.endsWith(":poison")) {
+              throw new Error("poison_inbound");
+            }
+            handled.push(event.providerMessageKey);
+          },
+        }),
+    );
+
+    const session = await prisma.openClawBotSession.findUniqueOrThrow({ where: { qrcode: "qr-session" } });
+    expect(decryptProviderCredential(session.getUpdatesBuf, testCredentialKey)).toBe("next-buffer");
+    expect(session.providerError).toBeNull();
+    expect(handled).toEqual(["openclaw-weixin:qr-session:later"]);
+    await expect(
+      prisma.appError.findFirstOrThrow({
+        where: {
+          source: "openclaw-updates",
+          fingerprint: "openclaw-updates:poison_inbound",
+        },
+      }),
+    ).resolves.toMatchObject({
+      severity: "error",
+      message: "poison_inbound",
+    });
+  });
+
   it("keeps the previous getupdates cursor when a session poll fails", async () => {
     await prisma.openClawBotSession.create({
       data: {

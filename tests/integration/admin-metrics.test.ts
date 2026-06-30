@@ -303,6 +303,38 @@ describe("admin overview metrics", () => {
     expect(JSON.stringify(body)).not.toContain("api-provider-hash-should-not-appear");
   });
 
+  it("rejects the public development admin token in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PROVIDER_MODE", "openclaw");
+    vi.stubEnv("ADMIN_TOKEN", "dev-admin-token");
+
+    const response = await getOverviewRoute(
+      new Request("http://local.test/api/admin/overview", {
+        headers: { authorization: "Bearer dev-admin-token" },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "unauthorized" });
+  });
+
+  it("rejects admin requests from outside the optional IP allowlist", async () => {
+    vi.stubEnv("ADMIN_TOKEN", "test-admin-token");
+    vi.stubEnv("ADMIN_ALLOWED_IPS", "203.0.113.10");
+
+    const response = await getOverviewRoute(
+      new Request("http://local.test/api/admin/overview", {
+        headers: {
+          authorization: "Bearer test-admin-token",
+          "x-forwarded-for": "198.51.100.20",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "unauthorized" });
+  });
+
   it("renders a quiet aggregate admin dashboard", async () => {
     vi.stubEnv("MIN_REACHABLE_MINUTES_TO_MATCH", "70");
     vi.stubEnv("REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES", "60");

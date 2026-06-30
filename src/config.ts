@@ -40,7 +40,8 @@ const EnvSchema = BaseEnvSchema
   .superRefine(validateFakeProvider)
   .superRefine(validateOpenClawCredentialSecret)
   .superRefine(validateOpenClawProviderUserHashSecret)
-  .superRefine(validateOpenClawAdminToken);
+  .superRefine(validateOpenClawAdminToken)
+  .superRefine(validateProductionAdminToken);
 
 export type AppConfig = z.infer<typeof EnvSchema>;
 export type QrProviderConfig = {
@@ -185,12 +186,21 @@ function validateFakeProvider(env: {
   PROVIDER_MODE: "fake" | "openclaw";
   ALLOW_FAKE_PROVIDER?: string;
 }, ctx: z.RefinementCtx) {
-  if (env.NODE_ENV !== "production" || env.PROVIDER_MODE !== "fake" || env.ALLOW_FAKE_PROVIDER === "1") return;
+  if (env.NODE_ENV !== "production") return;
+
+  if (env.ALLOW_FAKE_PROVIDER !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ALLOW_FAKE_PROVIDER"],
+      message: "ALLOW_FAKE_PROVIDER must not be set in production",
+    });
+  }
+  if (env.PROVIDER_MODE !== "fake") return;
 
   ctx.addIssue({
     code: "custom",
     path: ["PROVIDER_MODE"],
-    message: "PROVIDER_MODE must be openclaw in production unless ALLOW_FAKE_PROVIDER=1",
+    message: "PROVIDER_MODE must be openclaw in production",
   });
 }
 
@@ -225,6 +235,28 @@ function validateOpenClawAdminToken(env: {
       code: "custom",
       path: ["ADMIN_TOKEN"],
       message: "ADMIN_TOKEN must not use the development secret when PROVIDER_MODE=openclaw",
+    });
+  }
+}
+
+function validateProductionAdminToken(env: {
+  NODE_ENV?: string;
+  ADMIN_TOKEN: string;
+}, ctx: z.RefinementCtx) {
+  if (env.NODE_ENV !== "production") return;
+
+  if (env.ADMIN_TOKEN.length < 32) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ADMIN_TOKEN"],
+      message: "ADMIN_TOKEN must be at least 32 characters in production",
+    });
+  }
+  if (env.ADMIN_TOKEN === adminTokenDevelopmentSecret) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ADMIN_TOKEN"],
+      message: "ADMIN_TOKEN must not use the development secret in production",
     });
   }
 }

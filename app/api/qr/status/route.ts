@@ -1,13 +1,32 @@
 import { NextResponse } from "next/server";
 import type { EntryQrStatus } from "../../../../src/adapters/openclaw";
+import { fakeQrSessionMarker } from "../../../../src/adapters/fake-openclaw-entry";
 import { getOpenClawWeixinQrStatus } from "../../../../src/adapters/openclaw-weixin-entry";
 import { loadQrProviderConfig } from "../../../../src/config";
 import { prisma } from "../../../../src/storage/prisma";
+import { enforceRateLimit } from "../../../../src/web/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  const decision = enforceRateLimit(
+    request,
+    process.env.RATE_LIMIT_QR_STATUS_PER_WINDOW,
+    process.env.RATE_LIMIT_QR_STATUS_WINDOW_MS,
+    30,
+    10_000,
+  );
+  if (!decision.allowed) {
+    return NextResponse.json({ error: "rate_limited" }, {
+      status: 429,
+      headers: {
+        "Cache-Control": "no-store",
+        "Retry-After": String(Math.ceil(decision.retryAfterMs / 1000)),
+      },
+    });
+  }
+
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get("mode") ?? "fake";
   const sessionId = searchParams.get("sessionId");
@@ -18,6 +37,22 @@ export async function GET(request: Request) {
   }
 
   if (mode === "openclaw") {
+    const persistedSession = await prisma.openClawBotSession.findUnique({
+      where: { qrcode: sessionId },
+      select: { providerQrcodeHash: true },
+    });
+    if (persistedSession?.providerQrcodeHash === fakeQrSessionMarker(sessionId)) {
+      return NextResponse.json(
+        { error: "qr_mode_mismatch" },
+        {
+          status: 400,
+          headers: {
+            "Cache-Control": "no-store",
+          },
+        },
+      );
+    }
+
     try {
       return NextResponse.json(
         await getOpenClawWeixinQrStatus({
@@ -72,13 +107,24 @@ export async function GET(request: Request) {
   const now = new Date();
   const persistedSession = await prisma.openClawBotSession.findUnique({
     where: { qrcode: sessionId },
-    select: { status: true, expiresAt: true },
+    select: { status: true, expiresAt: true, providerQrcodeCiphertext: true },
   });
   if (!persistedSession) {
     return NextResponse.json(
       { error: "qr_session_not_found" },
       {
         status: 404,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      },
+    );
+  }
+  if (persistedSession.providerQrcodeCiphertext) {
+    return NextResponse.json(
+      { error: "qr_mode_mismatch" },
+      {
+        status: 400,
         headers: {
           "Cache-Control": "no-store",
         },

@@ -923,6 +923,46 @@ describe("outbox", () => {
     ).resolves.toEqual({ providerSendQuota: 998 });
   });
 
+  it("bounds stale sending recovery before retrying recovered messages", async () => {
+    const users = await Promise.all([
+      createReachableUser("outbox-stale-bound-1", 998),
+      createReachableUser("outbox-stale-bound-2", 998),
+      createReachableUser("outbox-stale-bound-3", 998),
+    ]);
+    await prisma.messageOutbox.createMany({
+      data: users.map((user, index) => ({
+        recipientUserId: user.id,
+        idempotencyKey: `outbox-stale-bound-${index + 1}`,
+        bodyCiphertextOrBody: `body ${index + 1}`,
+        status: "sending" as const,
+        nextAttemptAt: new Date(now.getTime() - (10 - index) * 60_000),
+        providerWindowCheckedAt: new Date(now.getTime() - (10 - index) * 60_000),
+      })),
+    });
+
+    const sent: string[] = [];
+    await withEnv({ OUTBOX_STALE_RECOVERY_BATCH_SIZE: "2" }, () =>
+      processOutboxBatch({
+        now,
+        limit: 10,
+        send: async (message) => {
+          sent.push(message.idempotencyKey);
+        },
+      }),
+    );
+
+    expect(sent).toEqual(["outbox-stale-bound-1", "outbox-stale-bound-2"]);
+    const messages = await prisma.messageOutbox.findMany({
+      orderBy: { idempotencyKey: "asc" },
+      select: { idempotencyKey: true, status: true },
+    });
+    expect(messages).toEqual([
+      { idempotencyKey: "outbox-stale-bound-1", status: "sent" },
+      { idempotencyKey: "outbox-stale-bound-2", status: "sent" },
+      { idempotencyKey: "outbox-stale-bound-3", status: "sending" },
+    ]);
+  });
+
   it("records an ok worker heartbeat after a batch", async () => {
     const user = await createReachableUser("outbox-heartbeat-recipient");
     await prisma.messageOutbox.create({

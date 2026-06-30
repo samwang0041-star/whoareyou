@@ -39,7 +39,7 @@ export async function processOpenClawUpdatesBatch(input: ProcessOpenClawUpdatesB
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
       take: input.limit,
     });
-    const result = { sessions: sessions.length, messages: 0, failedSessions: 0 };
+    const result = { sessions: sessions.length, messages: 0, failedMessages: 0, failedSessions: 0 };
     await recordWorkerHeartbeat({
       workerName,
       status: "running",
@@ -67,14 +67,24 @@ export async function processOpenClawUpdatesBatch(input: ProcessOpenClawUpdatesB
         });
 
         for (const message of updates.messages) {
-          await ensureProviderRef({
-            event: message.event,
-            contextToken: message.contextToken,
-            botSessionId: session.id,
-            config,
-          });
-          await handleInbound(message.event);
-          result.messages += 1;
+          try {
+            await ensureProviderRef({
+              event: message.event,
+              contextToken: message.contextToken,
+              botSessionId: session.id,
+              config,
+            });
+            await handleInbound(message.event);
+            result.messages += 1;
+          } catch (error) {
+            result.failedMessages += 1;
+            await recordMessageError({
+              qrcode: session.qrcode,
+              messageKey: message.event.providerMessageKey,
+              now: input.now,
+              error,
+            });
+          }
         }
 
         await prisma.openClawBotSession.update({
@@ -198,6 +208,19 @@ async function recordSessionError(input: { sessionId: string; qrcode: string; no
     now: input.now,
     context: {
       sessionHash: hashDiagnostic(input.qrcode),
+    },
+  });
+}
+
+async function recordMessageError(input: { qrcode: string; messageKey: string; now: Date; error: unknown }) {
+  await recordAppError({
+    source: workerName,
+    error: input.error,
+    now: input.now,
+    context: {
+      phase: "inbound_message",
+      sessionHash: hashDiagnostic(input.qrcode),
+      messageHash: hashDiagnostic(input.messageKey),
     },
   });
 }

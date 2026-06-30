@@ -30,6 +30,7 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
   const minimumReachableUntil = addMinutes(now, input.minReachableMinutesToMatch);
   const maxActiveConnections = input.maxActiveConnections ?? envInt("MAX_ACTIVE_CONNECTIONS", 5);
   const maxWaitingUsers = input.maxWaitingUsers ?? envInt("MAX_WAITING_USERS", 20);
+  const candidateScanLimit = envInt("MATCH_CANDIDATE_SCAN_LIMIT", Math.max(maxWaitingUsers * 2, 50));
 
   for (let attempt = 1; attempt <= maxMatchAttempts; attempt += 1) {
     try {
@@ -89,6 +90,7 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
             },
             orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
             select: { id: true },
+            take: candidateScanLimit,
           }), input.random ?? Math.random);
 
           for (const candidate of candidates) {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAdmin } from "../../../../../src/web/admin-auth";
 import { getConnectionDetail } from "../../../../../src/workers/admin-details";
 
 type RouteContext = {
@@ -6,8 +7,15 @@ type RouteContext = {
 };
 
 export async function GET(request: Request, context: RouteContext) {
-  if (!isAuthorized(request)) {
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const auth = requireAdmin(request);
+  if (!auth.ok) {
+    return NextResponse.json(
+      { error: auth.status === 429 ? "rate_limited" : "unauthorized" },
+      {
+        status: auth.status,
+        headers: auth.status === 429 ? { "Retry-After": String(auth.retryAfterSeconds) } : undefined,
+      },
+    );
   }
 
   const { id } = await context.params;
@@ -17,15 +25,4 @@ export async function GET(request: Request, context: RouteContext) {
   }
 
   return NextResponse.json(detail);
-}
-
-function isAuthorized(request: Request): boolean {
-  const expectedToken = process.env.ADMIN_TOKEN;
-  if (!expectedToken) return false;
-
-  const authorization = request.headers.get("authorization");
-  if (!authorization) return false;
-
-  const [scheme, token] = authorization.split(/\s+/, 2);
-  return scheme.toLowerCase() === "bearer" && token === expectedToken;
 }

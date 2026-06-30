@@ -186,6 +186,49 @@ describe("transactional matching", () => {
     ).resolves.toEqual({ state: "waiting" });
   });
 
+  it("only scans a bounded candidate window for one matching attempt", async () => {
+    await withEnv({ MATCH_CANDIDATE_SCAN_LIMIT: "2" }, async () => {
+      const currentUser = await createMatchableUser("matching-window-current");
+      const firstBlockedCandidate = await createMatchableUser("matching-window-blocked-1");
+      const secondBlockedCandidate = await createMatchableUser("matching-window-blocked-2");
+      const outsideWindowCandidate = await createMatchableUser("matching-window-outside");
+      await prisma.user.update({
+        where: { id: firstBlockedCandidate.id },
+        data: { updatedAt: new Date("2026-06-30T09:00:00.000Z") },
+      });
+      await prisma.user.update({
+        where: { id: secondBlockedCandidate.id },
+        data: { updatedAt: new Date("2026-06-30T09:01:00.000Z") },
+      });
+      await prisma.user.update({
+        where: { id: outsideWindowCandidate.id },
+        data: { updatedAt: new Date("2026-06-30T09:02:00.000Z") },
+      });
+      await prisma.pairBlock.createMany({
+        data: [
+          { ...orderedPair(currentUser.id, firstBlockedCandidate.id), reason: "left" },
+          { ...orderedPair(currentUser.id, secondBlockedCandidate.id), reason: "reported" },
+        ],
+      });
+
+      const result = await tryMatchUser({
+        userId: currentUser.id,
+        now,
+        minReachableMinutesToMatch: 60,
+        random: () => 0,
+      });
+
+      expect(result).toEqual({ status: "waiting" });
+      await expect(prisma.connection.count()).resolves.toBe(0);
+      await expect(
+        prisma.user.findUniqueOrThrow({
+          where: { id: outsideWindowCandidate.id },
+          select: { state: true },
+        }),
+      ).resolves.toEqual({ state: "available" });
+    });
+  });
+
   it("randomizes eligible candidates instead of always matching the oldest waiting user", async () => {
     const currentUser = await createMatchableUser("matching-random-current");
     const oldestCandidate = await createMatchableUser("matching-random-oldest");
