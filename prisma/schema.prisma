@@ -66,33 +66,6 @@ enum PairBlockReason {
   reported
 }
 
-enum RelayInviteState {
-  created
-  a_qr_issued
-  a_bound
-  b_qr_issued
-  connected
-  closed
-  expired
-}
-
-enum RelayParticipantRole {
-  a
-  b
-}
-
-enum RelayConnectionState {
-  active
-  closing
-  closed
-}
-
-enum RelayCloseReason {
-  disconnected
-  expired
-  provider_expired
-}
-
 model User {
   id                String    @id @default(cuid())
   providerUserHash  String    @unique
@@ -199,59 +172,6 @@ model PairBlock {
 
   @@unique([userLowId, userHighId])
   @@index([userLowId, userHighId])
-}
-
-model RelayInvite {
-  id            String            @id @default(cuid())
-  state         RelayInviteState  @default(created)
-  aBotSessionId String?
-  bBotSessionId String?
-  expiresAt     DateTime
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-  bQrIssuedAt   DateTime?
-  connectedAt   DateTime?
-  closedAt      DateTime?
-  closeReason   RelayCloseReason?
-
-  participants RelayParticipant[]
-  connection   RelayConnection?
-
-  @@index([state, updatedAt])
-  @@index([expiresAt])
-}
-
-model RelayParticipant {
-  id                           String               @id @default(cuid())
-  inviteId                     String
-  role                         RelayParticipantRole
-  provider                     String
-  providerUserHash             String
-  providerUserIdCiphertext     String
-  latestContextTokenCiphertext String?
-  botSessionId                 String
-  joinedAt                     DateTime             @default(now())
-  lastInboundAt                DateTime?
-  deletedAt                    DateTime?
-
-  invite RelayInvite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
-
-  @@unique([inviteId, role])
-  @@index([provider, providerUserHash])
-  @@index([botSessionId])
-}
-
-model RelayConnection {
-  id          String               @id @default(cuid())
-  inviteId    String               @unique
-  state       RelayConnectionState @default(active)
-  startedAt   DateTime             @default(now())
-  closedAt    DateTime?
-  closeReason RelayCloseReason?
-
-  invite RelayInvite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
-
-  @@index([state, startedAt])
 }
 
 model Report {

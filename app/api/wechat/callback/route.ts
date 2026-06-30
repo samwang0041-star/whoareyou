@@ -17,7 +17,6 @@ export async function GET(request: Request) {
     process.env.RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS,
     10,
     60_000,
-    { scope: "fake-callback" },
   );
   if (!rateLimited.allowed) {
     return NextResponse.json({ error: "rate_limited" }, {
@@ -85,7 +84,6 @@ export async function POST(request: Request) {
     process.env.RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS,
     10,
     60_000,
-    { scope: "fake-callback" },
   );
   if (!rateLimited.allowed) {
     return NextResponse.json({ error: "rate_limited" }, {

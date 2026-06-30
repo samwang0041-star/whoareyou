@@ -14,7 +14,6 @@ export async function GET(request: Request) {
     process.env.RATE_LIMIT_QR_WINDOW_MS,
     1,
     10_000,
-    { scope: "qr" },
   );
   if (!decision.allowed) {
     return NextResponse.json({ error: "rate_limited" }, {

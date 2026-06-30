@@ -1,4 +1,4 @@
-import type { ConnectionState, Prisma, RelayInviteState, ScheduledJobType } from "@prisma/client";
+import type { ConnectionState, Prisma, ScheduledJobType } from "@prisma/client";
 import { matchWaitingUsers } from "../domain/matching";
 import { isProviderWindowExpired, shouldSendRenewalPrompt } from "../domain/provider-policy";
 import { voice } from "../domain/voice";
@@ -455,15 +455,12 @@ async function processOutboxBodyCleanupJob(tx: ScheduledJobTransaction, now: Dat
 
 const entityCleanupBatchSize = 500;
 const cleanableSessionStatuses = ["expired", "superseded", "provider_error"];
-const terminalRelayInviteStates: RelayInviteState[] = ["closed", "expired"];
-const abandonedRelayInviteStates: RelayInviteState[] = ["created", "a_qr_issued", "a_bound", "b_qr_issued"];
 
 type EntityCleanupConfig = {
   sessionRetentionHours: number;
   inboundDedupeRetentionHours: number;
   appErrorRetentionHours: number;
   rateLimitRetentionHours: number;
-  relayInviteRetentionHours: number;
 };
 
 async function processEntityCleanupJob(tx: ScheduledJobTransaction, now: Date) {
@@ -472,14 +469,12 @@ async function processEntityCleanupJob(tx: ScheduledJobTransaction, now: Date) {
     inboundDedupeRetentionHours: envInt("ENTITY_CLEANUP_INBOUND_DEDUPE_RETENTION_HOURS", 24 * 7),
     appErrorRetentionHours: envInt("ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS", 24 * 30),
     rateLimitRetentionHours: envInt("ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS", 24 * 7),
-    relayInviteRetentionHours: envInt("ENTITY_CLEANUP_RELAY_INVITE_RETENTION_HOURS", 24),
   };
 
   await deleteExpiredSessions(tx, now, config.sessionRetentionHours);
   await deleteOldInboundDedupe(tx, now, config.inboundDedupeRetentionHours);
   await deleteResolvedAppErrors(tx, now, config.appErrorRetentionHours);
   await deleteOldRateLimitEvents(tx, now, config.rateLimitRetentionHours);
-  await deleteOldRelayInvites(tx, now, config.relayInviteRetentionHours);
 }
 
 async function deleteExpiredSessions(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
@@ -536,30 +531,6 @@ async function deleteOldRateLimitEvents(tx: ScheduledJobTransaction, now: Date, 
   if (oldEvents.length === 0) return;
   await tx.rateLimitEvent.deleteMany({
     where: { id: { in: oldEvents.map((row) => row.id) } },
-  });
-}
-
-async function deleteOldRelayInvites(tx: ScheduledJobTransaction, now: Date, retentionHours: number) {
-  const cutoff = addSeconds(now, -retentionHours * 60 * 60);
-  const oldInvites = await tx.relayInvite.findMany({
-    where: {
-      OR: [
-        {
-          state: { in: terminalRelayInviteStates },
-          updatedAt: { lt: cutoff },
-        },
-        {
-          state: { in: abandonedRelayInviteStates },
-          expiresAt: { lt: cutoff },
-        },
-      ],
-    },
-    select: { id: true },
-    take: entityCleanupBatchSize,
-  });
-  if (oldInvites.length === 0) return;
-  await tx.relayInvite.deleteMany({
-    where: { id: { in: oldInvites.map((row) => row.id) } },
   });
 }
 

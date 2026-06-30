@@ -13,7 +13,6 @@ const BaseEnvSchema = z.object({
   ADMIN_TOKEN: z.string().min(8),
   PROVIDER_USER_HASH_SECRET: z.string().min(16),
   ALLOW_FAKE_PROVIDER: z.string().optional(),
-  PRODUCT_MODE: z.enum(["unknown", "private_relay"]).default("unknown"),
   PROVIDER_MODE: z.enum(["fake", "openclaw"]).default("fake"),
   OPENCLAW_WEIXIN_API_BASE_URL: z.string().url().default("https://ilinkai.weixin.qq.com"),
   OPENCLAW_WEIXIN_BOT_TYPE: z.string().min(1).default("3"),
@@ -58,19 +57,16 @@ export type QrProviderConfig = {
 };
 export type ProviderModeConfig = {
   NODE_ENV?: string;
-  PRODUCT_MODE: "unknown" | "private_relay";
   PROVIDER_MODE: "fake" | "openclaw";
 };
 export type OpenClawUpdatesWorkerConfig = {
   NODE_ENV?: string;
   DATABASE_URL: string;
-  PRODUCT_MODE: "unknown" | "private_relay";
   PROVIDER_MODE: "openclaw";
   PROVIDER_USER_HASH_SECRET: string;
   PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: string;
   OPENCLAW_WEIXIN_CLIENT_VERSION: string;
   OPENCLAW_GETUPDATES_TIMEOUT_MS: number;
-  OPENCLAW_SEND_TIMEOUT_MS: number;
   PROVIDER_REPLY_WINDOW_HOURS: number;
   PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE: number;
 };
@@ -101,20 +97,17 @@ const QrProviderEnvSchema = BaseEnvSchema.pick({
 const ProviderModeEnvSchema = BaseEnvSchema.pick({
   NODE_ENV: true,
   ALLOW_FAKE_PROVIDER: true,
-  PRODUCT_MODE: true,
   PROVIDER_MODE: true,
 }).superRefine(validateFakeProvider);
 
 const OpenClawUpdatesWorkerEnvSchema = BaseEnvSchema.pick({
   NODE_ENV: true,
   DATABASE_URL: true,
-  PRODUCT_MODE: true,
   PROVIDER_MODE: true,
   PROVIDER_USER_HASH_SECRET: true,
   PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: true,
   OPENCLAW_WEIXIN_CLIENT_VERSION: true,
   OPENCLAW_GETUPDATES_TIMEOUT_MS: true,
-  OPENCLAW_SEND_TIMEOUT_MS: true,
   PROVIDER_REPLY_WINDOW_HOURS: true,
   PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE: true,
 }).extend({

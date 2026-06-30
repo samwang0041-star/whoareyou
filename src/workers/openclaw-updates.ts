@@ -10,7 +10,6 @@ import {
 } from "../adapters/openclaw-weixin-runtime";
 import { loadOpenClawUpdatesWorkerConfig } from "../config";
 import { findOrCreateUserFromInbound, hashProviderUserId } from "../domain/identity";
-import { handleRelayInbound } from "../domain/private-relay-inbound";
 import type { NormalizedInboundEvent } from "../domain/types";
 import { prisma } from "../storage/prisma";
 import { recordAppError, recordWorkerHeartbeat } from "./admin-metrics";
@@ -69,22 +68,13 @@ export async function processOpenClawUpdatesBatch(input: ProcessOpenClawUpdatesB
 
         for (const message of updates.messages) {
           try {
-            if (config.PRODUCT_MODE === "private_relay" && !input.handleInbound) {
-              await handleRelayInbound({
-                event: message.event,
-                contextToken: message.contextToken,
-                botSessionId: session.id,
-                config,
-              });
-            } else {
-              await ensureProviderRef({
-                event: message.event,
-                contextToken: message.contextToken,
-                botSessionId: session.id,
-                config,
-              });
-              await handleInbound(message.event);
-            }
+            await ensureProviderRef({
+              event: message.event,
+              contextToken: message.contextToken,
+              botSessionId: session.id,
+              config,
+            });
+            await handleInbound(message.event);
             result.messages += 1;
           } catch (error) {
             result.failedMessages += 1;

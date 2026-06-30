@@ -7,7 +7,7 @@ type QrResponse = {
   provider: "openclaw-weixin";
   mode: "fake" | "openclaw";
   sessionId: string;
-  status: string;
+  status: QrStatus;
   expiresAt: string;
   qr: {
     imageSrc: string;
@@ -16,157 +16,256 @@ type QrResponse = {
   statusUrl: string;
 };
 
-type RelayInviteResponse = {
-  inviteId: string;
-  state: "a_qr_issued";
-  aQr: QrResponse;
-};
-
-type RelayStatusResponse = {
-  state:
-    | "a_waiting_to_scan"
-    | "a_scan_confirming"
-    | "a_bound"
-    | "waiting_for_b_scan"
-    | "b_qr_expired"
-    | "connected"
-    | "closed"
-    | "expired";
-  canIssuePeerQr?: boolean;
-};
-
-type RelayPeerQrResponse = {
-  state: "waiting_for_b_scan";
-  bQr: QrResponse;
-};
-
-type RelayStage =
-  | "idle"
-  | "creating"
-  | "a_waiting_to_scan"
-  | "a_scan_confirming"
-  | "a_bound"
-  | "issuing_b_qr"
-  | "waiting_for_b_scan"
-  | "b_qr_expired"
-  | "connected"
-  | "closed"
+type QrStatus =
+  | "waiting_to_scan"
+  | "scan_confirming"
+  | "confirmed"
+  | "verification_required"
   | "expired"
-  | "error";
-
+  | "provider_error";
+type QrPhase = "idle" | "loading" | "ready" | "expired" | "connected" | "error";
+type ConnectedEntry = {
+  provider: QrResponse["provider"];
+  mode: QrResponse["mode"];
+  connectedAt: string;
+  expiresAt: string;
+};
+type QrStatusResponse = Pick<QrResponse, "expiresAt" | "sessionId"> & {
+  status: unknown;
+};
 type Locale = "zh" | "en";
 
 const githubUrl = "https://github.com/samwang0041-star/whoareyou";
 const contactEmail = "samwang0041@gmail.com";
-
-const copy = {
+const pageCopy = {
   zh: {
-    switchAria: "Switch to English",
+    localeName: "中文",
     switchLabel: "EN",
-    product: "UNKNOWN RELAY",
-    eyebrow: "披着 AI 入口的 1 对 1 隐身转发",
-    intro: "生成一张入口图。A 先扫。入口认得 A 之后，会出现另一张图。",
-    intro2: "把那张图交给 B。B 扫进来，你们就在同一个微信 AI 入口里说话。发 /断开，关系会消失。",
-    ctaIdle: "生成入口",
-    ctaLoading: "生成中",
-    reset: "重新生成",
+    switchAria: "Switch to English",
+    topLine: "一个被遗弃的入口",
+    hour: "one hour",
+    title: "UNKNOWN",
+    lead: "自从上次扫码体验功能后，被我忽略了很久的微信 AI 入口，突然传来一个陌生的声音。\n我以为是我的 agent 出了故障。",
+    subLead: "后来才发现，另一端也有人接入。一个莫名其妙的 bug，把两个以为正在找 agent 的人，接到了一起。",
+    enterIdle: "进入",
+    enterLoading: "入口亮起中",
+    enterConnected: "入口已亮",
+    enterHelper: "进入这个入口。也许 bug 只会存在一小时。",
+    connectedHelper: "回到微信，发「打开」。",
+    sideNote: "一小时后，程序员修好了它。连接断开，但那次不期而遇还留着。",
+    footerLine: "开源。不保存昵称、头像、手机号或明文聊天。只是把这个入口暂时留在这里。",
     github: "GitHub",
-    footer: "开源。不保存昵称、头像、手机号或明文聊天。只是一次很小的转发实验。",
-    contactPrefix: "如有侵权或不适，联系",
+    experience: "体验入口",
+    contactPrefix: "如有侵权，联系",
     contactSuffix: "，我会关闭本网站。",
-    states: {
-      idleTitle: "先生成 A 的入口",
-      idleBody: "这不是聊天室注册，也不是好友关系。它只会为这一次连接准备两张入口图。",
-      aWaitingTitle: "先让 A 扫这张入口图",
-      aWaitingBody: "A 扫进去之前，B 的入口不会出现。真正的流程从 A 被认出来之后开始。",
-      aConfirmingTitle: "A 已经靠近",
-      aConfirmingBody: "微信确认可能慢一点。这里会等它亮起，不需要重复点击。",
-      aBoundTitle: "A 已经接入",
-      aBoundBody: "正在生成另一张入口图。它只属于这次连接。",
-      issuingTitle: "正在生成 B 的入口图",
-      issuingBody: "不要着急。微信的二维码有时会慢几秒。",
-      bWaitingTitle: "把这张图交给 B",
-      bWaitingBody: "不是分享按钮，是一张只属于这次连接的入口图。",
-      bWaitingMobile: "让 B 长按识别这张入口图",
-      bWaitingDesktop: "让 B 用微信扫一扫这张入口图",
-      gap: "等 B 扫进来",
-      connectedTitle: "已经接通",
-      connectedBody: "回到微信说话。发 /断开，关系会消失。",
-      expiredTitle: "入口过期了",
-      expiredBody: "二维码只有很短的有效时间。重新生成一组入口图。",
-      closedTitle: "连接已经消失",
-      closedBody: "如果还想继续，需要重新生成、重新扫码、重新交给对方。",
-      errorTitle: "入口没有生成",
-      errorBody: "等一会儿再试。这个实验接受失败，但不应该让你困在这里。",
+    modal: {
+      errorTitle: "入口没有亮起",
+      localTitle: "入口预演",
+      wechatTitle: "微信里见",
+      connected: "已经靠近。",
+      known: "我知道了",
+      rescan: "重新扫码",
+      loading: "入口亮起中...",
+      loadingSr: "入口亮起中",
+      expiredPrompt: "这一盏已经熄了",
+      scanConfirmingPrompt: "回到微信，发「打开」",
+      verificationPrompt: "微信里还有一步",
+      providerErrorPrompt: "入口卡住了",
+      localPrompt: "本地预演入口",
+      realPrompt: "用微信扫一扫",
+      expiredHelper: "换一个二维码，再用微信扫一次。",
+      scanConfirmingHelper: "发出那两个字，入口会亮起来。",
+      verificationHelper: "照着微信里的提示走。",
+      providerErrorHelper: "换一个二维码，再试一次。",
+      localHelper: "这不是微信服务器二维码，只用于本地模拟扫码。",
+      realHelper: "扫完，回到微信发「打开」。",
+      mobileRealPrompt: "长按二维码识别",
+      mobileRealHelper: "识别后，回到微信发「打开」。",
+      expiredStatus: "已熄灭",
+      waitingStatus: "等你靠近",
+      scanConfirmingStatus: "等你开口",
+      verificationStatus: "等你回来",
+      providerErrorStatus: "需要重开",
+      readyStatus: "入口已亮起",
+      qrAltLocal: "本地预演二维码",
+      qrAltReal: "微信二维码",
+      refreshQr: "换一个二维码",
+      errorBody: "入口暂时没有亮起来。",
+      errorHelp: "等一会儿，再靠近一次。",
+      retry: "再试一次",
+      close: "关闭入口",
     },
   },
   en: {
-    switchAria: "切换到中文",
+    localeName: "English",
     switchLabel: "中",
-    product: "UNKNOWN RELAY",
-    eyebrow: "a hidden 1:1 relay wearing an AI entrance",
-    intro: "Generate an entrance image. A scans first. Only after A is recognized does the second image appear.",
-    intro2: "Give that image to B. When B scans it, both sides speak through the same WeChat AI entrance. Send /断开 and the relation disappears.",
-    ctaIdle: "Generate",
-    ctaLoading: "Generating",
-    reset: "Generate again",
+    switchAria: "切换到中文",
+    topLine: "an abandoned entrance",
+    hour: "one hour",
+    title: "UNKNOWN",
+    lead: "Since the last scan-to-try feature, the WeChat AI entrance I had ignored for a long time suddenly returned a stranger's voice.\nI thought my agent had broken.",
+    subLead: "Then I realized someone else had entered from the other side. A strange bug connected two people who both thought they were reaching an agent.",
+    enterIdle: "Enter",
+    enterLoading: "Lighting up",
+    enterConnected: "Entrance lit",
+    enterHelper: "Enter this doorway. The bug may only last one hour.",
+    connectedHelper: "Return to WeChat and send “打开”.",
+    sideNote: "An hour later, the programmer fixed it. The connection disappeared, but the accident stayed.",
+    footerLine: "Open source. No nicknames, avatars, phone numbers, or readable chat history. This entrance is only left here for a while.",
     github: "GitHub",
-    footer: "Open source. No nicknames, avatars, phone numbers, or readable chat history. Just a small relay experiment.",
+    experience: "Try it",
     contactPrefix: "If this infringes your rights, contact",
     contactSuffix: "and I will close the site.",
-    states: {
-      idleTitle: "Generate A's entrance first",
-      idleBody: "This is not chat registration or a friend relation. It only prepares two entrance images for this one connection.",
-      aWaitingTitle: "Let A scan this entrance image",
-      aWaitingBody: "B's entrance will not appear before A is recognized. The real flow starts after A is known.",
-      aConfirmingTitle: "A is close",
-      aConfirmingBody: "WeChat confirmation can lag. This page will wait for it.",
-      aBoundTitle: "A is connected",
-      aBoundBody: "Generating the second entrance image. It belongs only to this connection.",
-      issuingTitle: "Generating B's entrance image",
-      issuingBody: "Do not rush it. WeChat QR generation can take a few seconds.",
-      bWaitingTitle: "Give this image to B",
-      bWaitingBody: "This is not a share button. It is an entrance image that belongs only to this connection.",
-      bWaitingMobile: "Ask B to long-press this entrance image",
-      bWaitingDesktop: "Ask B to scan this entrance image with WeChat",
-      gap: "Waiting for B to scan",
-      connectedTitle: "Connected",
-      connectedBody: "Return to WeChat. Send /断开 and the relation disappears.",
-      expiredTitle: "The entrance expired",
-      expiredBody: "QR codes only live briefly. Generate a fresh pair.",
-      closedTitle: "The connection disappeared",
-      closedBody: "To continue, generate again, scan again, and hand a new image to the other side.",
-      errorTitle: "The entrance was not generated",
-      errorBody: "Wait a moment and try again. This experiment can fail, but it should not trap you.",
+    modal: {
+      errorTitle: "The entrance did not light up",
+      localTitle: "Local preview",
+      wechatTitle: "See you in WeChat",
+      connected: "You are close.",
+      known: "Got it",
+      rescan: "Scan again",
+      loading: "Lighting the entrance...",
+      loadingSr: "Lighting the entrance",
+      expiredPrompt: "This one has gone out",
+      scanConfirmingPrompt: "Return to WeChat and send “打开”",
+      verificationPrompt: "One more step in WeChat",
+      providerErrorPrompt: "The entrance got stuck",
+      localPrompt: "Local preview entrance",
+      realPrompt: "Scan with WeChat",
+      expiredHelper: "Get a new QR code and scan again.",
+      scanConfirmingHelper: "Send those two characters and the entrance will light up.",
+      verificationHelper: "Follow the prompt in WeChat.",
+      providerErrorHelper: "Get a new QR code and try again.",
+      localHelper: "This is not a WeChat server QR code. It is only for local simulation.",
+      realHelper: "After scanning, return to WeChat and send “打开”.",
+      mobileRealPrompt: "Long-press the QR code",
+      mobileRealHelper: "After it opens in WeChat, send “打开”.",
+      expiredStatus: "Expired",
+      waitingStatus: "Waiting",
+      scanConfirmingStatus: "Waiting for words",
+      verificationStatus: "Waiting for return",
+      providerErrorStatus: "Needs reset",
+      readyStatus: "Entrance lit",
+      qrAltLocal: "Local preview QR code",
+      qrAltReal: "WeChat QR code",
+      refreshQr: "New QR code",
+      errorBody: "The entrance did not light up.",
+      errorHelp: "Wait a moment, then come close again.",
+      retry: "Try again",
+      close: "Close entrance",
     },
   },
 } as const;
 
-function secondsUntilExpiry(expiresAt: string | null) {
-  if (!expiresAt) return null;
+const CONNECTED_ENTRY_COOKIE = "whoareyou_entry_connected";
+const CONNECTED_ENTRY_MAX_AGE_SECONDS = 24 * 60 * 60;
+function isConnectedEntry(value: unknown): value is ConnectedEntry {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ConnectedEntry>;
+  if (candidate.provider !== "openclaw-weixin") return false;
+  if (candidate.mode !== "fake" && candidate.mode !== "openclaw") return false;
+  if (typeof candidate.connectedAt !== "string") return false;
+  if (typeof candidate.expiresAt !== "string") return false;
+  return !Number.isNaN(Date.parse(candidate.expiresAt));
+}
+
+function clearConnectedEntryCookie() {
+  document.cookie = `${CONNECTED_ENTRY_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax`;
+}
+
+function readConnectedEntryCookie() {
+  const rawCookie = document.cookie
+    .split("; ")
+    .find((cookie) => cookie.startsWith(`${CONNECTED_ENTRY_COOKIE}=`));
+  if (!rawCookie) return null;
+
+  try {
+    const [, rawValue] = rawCookie.split("=");
+    const parsed = JSON.parse(decodeURIComponent(rawValue ?? ""));
+    if (!isConnectedEntry(parsed)) {
+      clearConnectedEntryCookie();
+      return null;
+    }
+    if (Date.parse(parsed.expiresAt) <= Date.now()) {
+      clearConnectedEntryCookie();
+      return null;
+    }
+    return parsed;
+  } catch {
+    clearConnectedEntryCookie();
+    return null;
+  }
+}
+
+function writeConnectedEntryCookie(entry: ConnectedEntry) {
+  document.cookie = `${CONNECTED_ENTRY_COOKIE}=${encodeURIComponent(
+    JSON.stringify(entry),
+  )}; Max-Age=${CONNECTED_ENTRY_MAX_AGE_SECONDS}; Path=/; SameSite=Lax`;
+}
+
+function buildConnectedEntry(source: QrResponse): ConnectedEntry {
+  const connectedAt = new Date();
+  const expiresAt = new Date(
+    connectedAt.getTime() + CONNECTED_ENTRY_MAX_AGE_SECONDS * 1_000,
+  );
+  return {
+    provider: source.provider,
+    mode: source.mode,
+    connectedAt: connectedAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  };
+}
+
+function secondsUntilExpiry(expiresAt: string) {
   const expiresAtMs = Date.parse(expiresAt);
-  if (Number.isNaN(expiresAtMs)) return null;
+  if (Number.isNaN(expiresAtMs)) return 0;
   return Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
 }
 
-function formatRemaining(seconds: number | null) {
-  if (seconds === null) return "";
+function formatRemaining(seconds: number) {
   const minutes = Math.floor(seconds / 60);
   const nextSeconds = seconds % 60;
   return `${minutes.toString().padStart(2, "0")}:${nextSeconds.toString().padStart(2, "0")}`;
 }
 
+function normalizeQrStatus(status: unknown): QrStatus {
+  if (
+    status === "waiting_to_scan" ||
+    status === "scan_confirming" ||
+    status === "confirmed" ||
+    status === "verification_required" ||
+    status === "expired" ||
+    status === "provider_error"
+  ) {
+    return status;
+  }
+
+  if (status === "scaned") return "scan_confirming";
+
+  return "provider_error";
+}
+
 export default function HomePage() {
   const [locale, setLocale] = useState<Locale>("zh");
-  const [stage, setStage] = useState<RelayStage>("idle");
-  const [inviteId, setInviteId] = useState<string | null>(null);
-  const [aQr, setAQr] = useState<QrResponse | null>(null);
-  const [bQr, setBQr] = useState<QrResponse | null>(null);
-  const [isIssuingPeerQr, setIsIssuingPeerQr] = useState(false);
-  const [isCompactViewport, setIsCompactViewport] = useState(false);
+  const [entryQr, setEntryQr] = useState<QrResponse | null>(null);
+  const [phase, setPhase] = useState<QrPhase>("idle");
+  const [qrStatus, setQrStatus] = useState<QrStatus | null>(null);
+  const [connectedEntry, setConnectedEntry] = useState<ConnectedEntry | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
-  const t = copy[locale];
+  const [isReady, setIsReady] = useState(false);
+  const [isCompactViewport, setIsCompactViewport] = useState(false);
+  const t = pageCopy[locale];
+  const modalCopy = t.modal;
   const nextLocale: Locale = locale === "zh" ? "en" : "zh";
+
+  useEffect(() => {
+    const readyTimer = window.setTimeout(() => {
+      setConnectedEntry(readConnectedEntryCookie());
+      setIsReady(true);
+    }, 0);
+    return () => window.clearTimeout(readyTimer);
+  }, []);
 
   useEffect(() => {
     const query = window.matchMedia("(max-width: 767px)");
@@ -176,136 +275,196 @@ export default function HomePage() {
     return () => query.removeEventListener("change", updateViewport);
   }, []);
 
-  const issuePeerQr = useCallback(async (id: string) => {
-    setIsIssuingPeerQr(true);
-    setStage("issuing_b_qr");
-    try {
-      const response = await fetch(`/api/relay/invites/${id}/peer-qr`, {
-        method: "POST",
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error("peer_qr_failed");
-      const data = (await response.json()) as RelayPeerQrResponse;
-      setBQr(data.bQr);
-      setStage("waiting_for_b_scan");
-    } catch {
-      setStage("error");
-    } finally {
-      setIsIssuingPeerQr(false);
-    }
+  const markEntryConnected = useCallback((source: QrResponse) => {
+    const nextConnectedEntry = buildConnectedEntry(source);
+    writeConnectedEntryCookie(nextConnectedEntry);
+    setConnectedEntry(nextConnectedEntry);
+    setQrStatus("confirmed");
+    setRemainingSeconds(null);
+    setPhase("connected");
+  }, []);
+
+  const recordProviderError = useCallback(() => {
+    setQrStatus("provider_error");
   }, []);
 
   useEffect(() => {
-    if (!inviteId || stage === "idle" || stage === "creating" || stage === "connected" || stage === "closed" || stage === "expired" || stage === "error") {
-      return;
-    }
+    if (!isModalOpen || !entryQr || phase !== "ready") return;
 
-    let cancelled = false;
+    let isCancelled = false;
     let timer: number | null = null;
 
-    async function poll() {
-      if (!inviteId) return;
+    async function pollStatus() {
+      if (!entryQr) return;
+      let shouldContinuePolling = true;
+      if (secondsUntilExpiry(entryQr.expiresAt) === 0) {
+        setPhase("expired");
+        setQrStatus("expired");
+        shouldContinuePolling = false;
+        return;
+      }
+
       try {
-        const response = await fetch(`/api/relay/invites/${inviteId}/status`, { cache: "no-store" });
-        if (!response.ok) throw new Error("status_failed");
-        const data = (await response.json()) as RelayStatusResponse;
-        if (cancelled) return;
-
-        if (data.state === "a_bound") {
-          setStage("a_bound");
-          if (!bQr && !isIssuingPeerQr) {
-            await issuePeerQr(inviteId);
-          }
-        } else {
-          setStage(data.state);
+        const response = await fetch(entryQr.statusUrl, { cache: "no-store" });
+        const data = (await response.json()) as QrStatusResponse;
+        if (isCancelled) return;
+        if (!response.ok) {
+          shouldContinuePolling = false;
+          recordProviderError();
+          return;
         }
-
-        if (!cancelled && data.state !== "connected" && data.state !== "closed" && data.state !== "expired") {
-          timer = window.setTimeout(poll, 1_500);
+        const nextStatus = normalizeQrStatus(data.status);
+        setQrStatus(nextStatus);
+        if (nextStatus === "provider_error") {
+          shouldContinuePolling = false;
+        }
+        if (nextStatus === "confirmed") {
+          shouldContinuePolling = false;
+          markEntryConnected(entryQr);
+        }
+        if (nextStatus === "expired") {
+          shouldContinuePolling = false;
+          setPhase("expired");
         }
       } catch {
-        if (!cancelled) setStage("error");
+        shouldContinuePolling = false;
+        if (!isCancelled) recordProviderError();
+      } finally {
+        if (!isCancelled && shouldContinuePolling) {
+          timer = window.setTimeout(pollStatus, 3_000);
+        }
       }
     }
 
-    void poll();
+    void pollStatus();
     return () => {
-      cancelled = true;
+      isCancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [bQr, inviteId, isIssuingPeerQr, issuePeerQr, stage]);
+  }, [entryQr, isModalOpen, markEntryConnected, phase, recordProviderError]);
 
   useEffect(() => {
-    const expiresAt = bQr?.expiresAt ?? aQr?.expiresAt ?? null;
-    if (!expiresAt || stage === "idle" || stage === "connected" || stage === "closed" || stage === "error") {
-      return;
+    if (!isModalOpen || !entryQr || (phase !== "ready" && phase !== "expired")) return;
+
+    function tick() {
+      if (!entryQr) return;
+      const nextRemainingSeconds = secondsUntilExpiry(entryQr.expiresAt);
+      setRemainingSeconds(nextRemainingSeconds);
+      if (nextRemainingSeconds === 0) {
+        setPhase("expired");
+        setQrStatus("expired");
+      }
     }
 
-    const tick = () => {
-      const nextRemaining = secondsUntilExpiry(expiresAt);
-      setRemainingSeconds(nextRemaining);
-      if (nextRemaining === 0) setStage("expired");
-    };
     tick();
     const timer = window.setInterval(tick, 1_000);
     return () => window.clearInterval(timer);
-  }, [aQr?.expiresAt, bQr?.expiresAt, stage]);
+  }, [entryQr, isModalOpen, phase]);
 
-  async function startRelay() {
-    setStage("creating");
-    setInviteId(null);
-    setAQr(null);
-    setBQr(null);
+  async function loadQr() {
+    setIsModalOpen(true);
+    setIsLoading(true);
+    setPhase("loading");
+    setEntryQr(null);
+    setQrStatus(null);
     setRemainingSeconds(null);
 
     try {
-      const response = await fetch("/api/relay/invites", {
-        method: "POST",
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error("invite_failed");
-      const data = (await response.json()) as RelayInviteResponse;
-      setInviteId(data.inviteId);
-      setAQr(data.aQr);
-      setStage("a_waiting_to_scan");
+      const response = await fetch("/api/qr", { cache: "no-store" });
+      if (!response.ok) throw new Error("qr_unavailable");
+      const data = (await response.json()) as QrResponse;
+      const nextQr = {
+        ...data,
+        status: normalizeQrStatus(data.status),
+      };
+      setEntryQr(nextQr);
+      setQrStatus(nextQr.status);
+      setRemainingSeconds(secondsUntilExpiry(nextQr.expiresAt));
+      if (nextQr.status === "confirmed") {
+        markEntryConnected(nextQr);
+        return;
+      }
+      setPhase(nextQr.status === "expired" ? "expired" : "ready");
     } catch {
-      setStage("error");
+      setPhase("error");
+    } finally {
+      setIsLoading(false);
     }
   }
 
-  const stateCopy = stage === "creating"
-    ? { title: t.states.idleTitle, body: t.states.idleBody }
-    : stage === "a_waiting_to_scan"
-      ? { title: t.states.aWaitingTitle, body: t.states.aWaitingBody }
-      : stage === "a_scan_confirming"
-        ? { title: t.states.aConfirmingTitle, body: t.states.aConfirmingBody }
-        : stage === "a_bound"
-          ? { title: t.states.aBoundTitle, body: t.states.aBoundBody }
-          : stage === "issuing_b_qr"
-            ? { title: t.states.issuingTitle, body: t.states.issuingBody }
-            : stage === "waiting_for_b_scan"
-              ? { title: t.states.bWaitingTitle, body: t.states.bWaitingBody }
-              : stage === "connected"
-                ? { title: t.states.connectedTitle, body: t.states.connectedBody }
-                : stage === "expired" || stage === "b_qr_expired"
-                  ? { title: t.states.expiredTitle, body: t.states.expiredBody }
-                  : stage === "closed"
-                    ? { title: t.states.closedTitle, body: t.states.closedBody }
-                    : stage === "error"
-                      ? { title: t.states.errorTitle, body: t.states.errorBody }
-                      : { title: t.states.idleTitle, body: t.states.idleBody };
+  function enter() {
+    const existingConnectedEntry = readConnectedEntryCookie();
+    if (existingConnectedEntry) {
+      setConnectedEntry(existingConnectedEntry);
+      setEntryQr(null);
+      setQrStatus("confirmed");
+      setRemainingSeconds(null);
+      setPhase("connected");
+      setIsModalOpen(true);
+      return;
+    }
 
-  const canStart = stage !== "creating" && stage !== "issuing_b_qr";
-  const showReset = stage === "expired" || stage === "b_qr_expired" || stage === "closed" || stage === "error";
-  const shouldShowCountdown =
-    remainingSeconds !== null &&
-    (stage === "a_waiting_to_scan" ||
-      stage === "a_scan_confirming" ||
-      stage === "a_bound" ||
-      stage === "issuing_b_qr" ||
-      stage === "waiting_for_b_scan" ||
-      stage === "b_qr_expired" ||
-      stage === "expired");
+    void loadQr();
+  }
+
+  function rescan() {
+    clearConnectedEntryCookie();
+    setConnectedEntry(null);
+    void loadQr();
+  }
+
+  function closeModal() {
+    setIsModalOpen(false);
+  }
+
+  const isQrExpired = phase === "expired" || qrStatus === "expired" || remainingSeconds === 0;
+  const qrCountdown = remainingSeconds === null ? null : formatRemaining(remainingSeconds);
+  const shouldShowQr = Boolean(entryQr && (phase === "ready" || phase === "expired"));
+  const hasConnectedEntry = phase === "connected" || Boolean(connectedEntry);
+  const isLocalQrPreview = entryQr?.mode === "fake" && shouldShowQr;
+  const shouldUseLongPressCopy = shouldShowQr && !isLocalQrPreview && isCompactViewport;
+  const qrPrompt = isQrExpired
+    ? modalCopy.expiredPrompt
+    : qrStatus === "scan_confirming"
+      ? modalCopy.scanConfirmingPrompt
+      : qrStatus === "verification_required"
+        ? modalCopy.verificationPrompt
+        : qrStatus === "provider_error"
+          ? modalCopy.providerErrorPrompt
+          : isLocalQrPreview
+            ? modalCopy.localPrompt
+            : shouldUseLongPressCopy
+              ? modalCopy.mobileRealPrompt
+              : modalCopy.realPrompt;
+  const qrHelperText = isQrExpired
+    ? modalCopy.expiredHelper
+    : qrStatus === "scan_confirming"
+      ? modalCopy.scanConfirmingHelper
+      : qrStatus === "verification_required"
+        ? modalCopy.verificationHelper
+        : qrStatus === "provider_error"
+          ? modalCopy.providerErrorHelper
+          : isLocalQrPreview
+            ? modalCopy.localHelper
+            : shouldUseLongPressCopy
+              ? modalCopy.mobileRealHelper
+              : modalCopy.realHelper;
+  const qrStatusLabel = isQrExpired
+    ? modalCopy.expiredStatus
+    : qrStatus === "waiting_to_scan"
+      ? `${modalCopy.waitingStatus}${qrCountdown ? ` · ${qrCountdown}` : ""}`
+      : qrStatus === "scan_confirming"
+        ? modalCopy.scanConfirmingStatus
+        : qrStatus === "verification_required"
+        ? modalCopy.verificationStatus
+        : qrStatus === "provider_error"
+          ? modalCopy.providerErrorStatus
+          : modalCopy.readyStatus;
+  const dialogTitle =
+    phase === "error" ? modalCopy.errorTitle : isLocalQrPreview ? modalCopy.localTitle : modalCopy.wechatTitle;
+  const enterButtonText = connectedEntry ? t.enterConnected : isLoading ? t.enterLoading : t.enterIdle;
+  const enterHelperText = connectedEntry ? t.connectedHelper : t.enterHelper;
+  const canReopenAfterProviderError = qrStatus === "provider_error";
 
   return (
     <main className="relative min-h-[100svh] overflow-hidden bg-[#0c0b10] text-[#f7f1e8]">
@@ -319,13 +478,14 @@ export default function HomePage() {
           sizes="100vw"
           src="/whoareyou-main-visual-abstract.png"
         />
-        <div className="absolute inset-0 bg-[linear-gradient(90deg,#0c0b10_0%,rgba(12,11,16,0.92)_32%,rgba(12,11,16,0.52)_58%,rgba(12,11,16,0.16)_100%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(90deg,#0c0b10_0%,rgba(12,11,16,0.9)_28%,rgba(12,11,16,0.5)_48%,rgba(12,11,16,0.04)_72%,rgba(12,11,16,0.22)_100%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(12,11,16,0.7)_0%,rgba(12,11,16,0.38)_62%,rgba(12,11,16,0.1)_100%)] sm:hidden" />
         <div className="absolute inset-x-0 bottom-0 h-64 bg-[linear-gradient(180deg,rgba(12,11,16,0)_0%,#0c0b10_92%)]" />
       </div>
 
-      <section className="relative z-10 mx-auto grid min-h-[100svh] w-full max-w-6xl grid-rows-[auto_1fr_auto] px-6 py-7 sm:px-10 sm:py-10">
-        <header className="flex items-center justify-between gap-5 text-xs text-[#9b9388]">
-          <span>{t.eyebrow}</span>
+      <section className="relative z-10 mx-auto flex min-h-[100svh] w-full max-w-6xl flex-col justify-between px-6 py-7 sm:px-10 sm:py-10">
+        <div className="flex items-center justify-between gap-5 text-xs text-[#9b9388]">
+          <span>{t.topLine}</span>
           <div className="flex items-center gap-4">
             <a className="transition hover:text-[#fff8ed]" href={githubUrl} rel="noreferrer" target="_blank">
               {t.github}
@@ -338,124 +498,185 @@ export default function HomePage() {
             >
               {t.switchLabel}
             </button>
+            <span className="hidden sm:inline">{t.hour}</span>
           </div>
-        </header>
-
-        <div className="grid items-center gap-10 py-10 lg:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.75fr)]">
-          <section className="max-w-2xl">
-            <h1 className="text-5xl font-normal leading-none text-[#fff8ed] sm:text-7xl md:text-8xl">
-              {t.product}
-            </h1>
-            <p className="mt-7 max-w-xl text-xl leading-8 text-[#eadfce] sm:text-2xl sm:leading-9">
-              {t.intro}
-            </p>
-            <p className="mt-4 max-w-xl text-sm leading-7 text-[#b8aa96] sm:text-base">
-              {t.intro2}
-            </p>
-            <div className="mt-9 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <button
-                className="h-12 w-full border border-[#f7f1e8]/55 px-7 text-base text-[#fff8ed] transition hover:border-[#fff8ed] hover:bg-[#fff8ed]/5 disabled:cursor-wait disabled:opacity-60 sm:w-auto"
-                disabled={!canStart}
-                onClick={startRelay}
-                type="button"
-              >
-                {stage === "creating" ? t.ctaLoading : showReset ? t.reset : t.ctaIdle}
-              </button>
-              <span className="text-sm leading-6 text-[#9b9388]">
-                {shouldShowCountdown ? `QR ${formatRemaining(remainingSeconds)}` : "one connection"}
-              </span>
-            </div>
-          </section>
-
-          <section className="border border-[#f7f1e8]/24 bg-[#0f0d14]/78 p-5 shadow-2xl shadow-black/25 backdrop-blur-md sm:p-6">
-            <div className="flex items-start justify-between gap-5 border-b border-[#f7f1e8]/16 pb-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.24em] text-[#9b9388]">relay state</p>
-                <h2 className="mt-3 text-2xl font-normal text-[#fff8ed]">{stateCopy.title}</h2>
-              </div>
-              <span className="border border-[#f7f1e8]/20 px-3 py-1 text-xs text-[#d7cab8]">
-                {stage.replaceAll("_", " ")}
-              </span>
-            </div>
-
-            <p className="mt-5 min-h-12 text-sm leading-7 text-[#c7baa8]">{stateCopy.body}</p>
-
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <QrPanel
-                alt="A entry QR"
-                imageSrc={aQr?.qr.imageSrc}
-                label="A"
-                testId="relay-a-qr"
-                title={t.states.aWaitingTitle}
-              />
-              <QrPanel
-                alt="B entry QR"
-                imageSrc={bQr?.qr.imageSrc}
-                label="B"
-                testId="relay-b-qr"
-                title={isCompactViewport ? t.states.bWaitingMobile : t.states.bWaitingDesktop}
-              />
-            </div>
-
-            {stage === "waiting_for_b_scan" ? (
-              <div className="mt-5 border-t border-[#f7f1e8]/16 pt-4">
-                <p className="text-base text-[#fff8ed]">{t.states.bWaitingTitle}</p>
-                <p className="mt-2 text-sm leading-6 text-[#b8aa96]">{t.states.bWaitingBody}</p>
-                <p className="mt-3 text-sm text-[#d7cab8]">{t.states.gap}</p>
-              </div>
-            ) : null}
-
-            {stage === "connected" ? (
-              <div className="mt-5 border border-[#f7f1e8]/24 px-4 py-4">
-                <p className="text-xl text-[#fff8ed]">{t.states.connectedTitle}</p>
-                <p className="mt-2 text-sm leading-6 text-[#d7cab8]">{t.states.connectedBody}</p>
-              </div>
-            ) : null}
-          </section>
         </div>
 
-        <footer className="flex flex-col gap-2 border-t border-[#f7f1e8]/16 pt-5 text-xs leading-6 text-[#8d8478] sm:flex-row sm:items-center sm:justify-between">
-          <span>{t.footer}</span>
-          <span>
-            {t.contactPrefix}{" "}
-            <a className="text-[#d7cab8] hover:text-[#fff8ed]" href={`mailto:${contactEmail}`}>
-              {contactEmail}
-            </a>
-            {locale === "zh" ? t.contactSuffix : ` ${t.contactSuffix}`}
-          </span>
-        </footer>
-      </section>
-    </main>
-  );
-}
+        <div className="max-w-2xl py-10 sm:py-12">
+          <h1 className="text-5xl font-normal leading-none text-[#fff8ed] sm:text-7xl md:text-8xl">
+            {t.title}
+          </h1>
+          <p className="mt-7 max-w-xl whitespace-pre-line text-xl leading-8 text-[#eadfce] sm:text-2xl sm:leading-9">
+            {t.lead}
+          </p>
+          <p className="mt-5 max-w-md text-sm leading-7 text-[#b8aa96] sm:text-base sm:leading-7">
+            {t.subLead}
+          </p>
 
-function QrPanel(input: {
-  alt: string;
-  imageSrc?: string;
-  label: string;
-  testId: string;
-  title: string;
-}) {
-  return (
-    <div className="min-h-64 border border-[#f7f1e8]/18 p-4">
-      <div className="flex items-center justify-between text-xs text-[#9b9388]">
-        <span>{input.label}</span>
-        <span>{input.imageSrc ? "ready" : "waiting"}</span>
-      </div>
-      <div className="mt-4 flex aspect-square items-center justify-center bg-[#fffaf3] p-3">
-        {input.imageSrc ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            alt={input.alt}
-            className="h-full w-full object-contain"
-            data-testid={input.testId}
-            src={input.imageSrc}
-          />
-        ) : (
-          <div className="h-full w-full border border-dashed border-[#0c0b10]/20" />
-        )}
-      </div>
-      <p className="mt-4 text-sm leading-6 text-[#d7cab8]">{input.title}</p>
-    </div>
+          <div className="mt-10 flex flex-col gap-4 sm:flex-row sm:items-center">
+            <button
+              className="h-12 w-full border border-[#f7f1e8]/55 px-7 text-base text-[#fff8ed] transition hover:border-[#fff8ed] hover:bg-[#fff8ed]/5 disabled:cursor-wait disabled:opacity-60 sm:w-auto"
+              disabled={!isReady || isLoading}
+              onClick={enter}
+            >
+              {enterButtonText}
+            </button>
+            <p className="max-w-lg text-sm leading-6 text-[#9b9388]">
+              {enterHelperText}
+            </p>
+          </div>
+
+          <div className="mt-9 max-w-md border-l border-[#f7f1e8]/18 pl-5 text-xs leading-6 text-[#9b9388] sm:text-sm">
+            {t.sideNote}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-[#f7f1e8]/10 pt-4 text-xs leading-6 text-[#8f867c] sm:flex-row sm:items-center sm:justify-between">
+          <p className="max-w-xl">{t.footerLine}</p>
+          <p className="flex shrink-0 flex-wrap gap-x-4 gap-y-1">
+            <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={githubUrl} rel="noreferrer" target="_blank">
+              {t.github}
+            </a>
+            <span>
+              {t.contactPrefix}{" "}
+              <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={`mailto:${contactEmail}`}>
+                {contactEmail}
+              </a>
+              {t.contactSuffix}
+            </span>
+          </p>
+        </div>
+      </section>
+
+      {isModalOpen ? (
+        <div
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex min-h-screen items-center justify-center bg-[#08070b]/82 px-4 py-6 backdrop-blur-md"
+          role="dialog"
+        >
+          <div
+            className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto border border-[#f7f1e8]/18 bg-[#111017]/95 p-6 text-[#f7f1e8] shadow-2xl shadow-black/65 sm:p-7"
+            data-testid="wechat-entry-dialog"
+          >
+            <div className="flex items-start justify-between gap-6">
+              <div>
+                <h2 className="mt-3 text-4xl font-normal leading-none text-[#fff8ed] sm:text-[2.75rem]">
+                  {dialogTitle}
+                </h2>
+              </div>
+              <button
+                aria-label={modalCopy.close}
+                className="grid h-10 w-10 place-items-center border border-[#f7f1e8]/18 text-3xl leading-none text-[#b8aa96] transition hover:border-[#f7f1e8]/45 hover:text-[#fff8ed]"
+                onClick={closeModal}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mt-6 flex flex-col items-center justify-center text-center">
+              {hasConnectedEntry ? (
+                <>
+                  <p className="text-lg text-[#fff8ed]">{modalCopy.connected}</p>
+                  <p className="mt-3 max-w-sm text-sm leading-6 text-[#b8aa96]">
+                    {t.connectedHelper}
+                  </p>
+                  <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                    <button
+                      className="h-11 border border-[#f7f1e8]/45 px-6 text-sm text-[#fff8ed] transition hover:border-[#fff8ed] hover:bg-[#fff8ed]/5"
+                      onClick={closeModal}
+                      type="button"
+                    >
+                      {modalCopy.known}
+                    </button>
+                    <button
+                      className="h-11 border border-[#f7f1e8]/18 px-6 text-sm text-[#b8aa96] transition hover:border-[#f7f1e8]/45 hover:text-[#fff8ed]"
+                      disabled={isLoading}
+                      onClick={rescan}
+                      type="button"
+                    >
+                      {modalCopy.rescan}
+                    </button>
+                  </div>
+                </>
+              ) : null}
+
+              {phase === "loading" ? (
+                <>
+                  <p className="text-lg text-[#fff8ed]">{modalCopy.loading}</p>
+                  <div className="mt-6 grid h-60 w-60 place-items-center border border-[#f7f1e8]/18 bg-[#17131d]">
+                    <div className="h-11 w-11 animate-spin rounded-full border-8 border-[#f7f1e8]/15 border-t-[#fff8ed]" />
+                    <p className="sr-only">{modalCopy.loadingSr}</p>
+                  </div>
+                </>
+              ) : null}
+
+              {shouldShowQr && entryQr ? (
+                <>
+                  <p className="text-lg text-[#fff8ed]">{qrPrompt}</p>
+                  <div className="relative mt-5 aspect-square w-[min(15rem,calc(100vw-7rem))] border border-[#f7f1e8]/16 bg-[#fffaf2] p-3 shadow-2xl shadow-black/30">
+                    <Image
+                      alt={isLocalQrPreview ? modalCopy.qrAltLocal : modalCopy.qrAltReal}
+                      className={`h-full w-full object-contain transition duration-300 ${isQrExpired ? "blur-sm opacity-55" : ""}`}
+                      data-testid="wechat-qr-image"
+                      fill
+                      sizes="240px"
+                      src={entryQr.qr.imageSrc}
+                      unoptimized
+                    />
+                    {isQrExpired ? (
+                      <div className="absolute inset-0 grid place-items-center bg-[#fffaf2]/30">
+                        <button
+                          aria-label={modalCopy.refreshQr}
+                          className="flex h-14 items-center gap-2 border border-[#111016]/25 bg-[#fffaf2] px-6 text-lg text-[#19151d] shadow-lg shadow-black/25 transition hover:border-[#111016] hover:bg-white"
+                          disabled={isLoading}
+                          onClick={loadQr}
+                          type="button"
+                        >
+                          <span aria-hidden="true" className="text-2xl leading-none">
+                            ↻
+                          </span>
+                          {modalCopy.refreshQr}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-[#9b9388]">{qrHelperText}</p>
+                  <p className="mt-2 border border-[#f7f1e8]/18 px-3 py-1 text-xs text-[#b8aa96]">
+                    {qrStatusLabel}
+                  </p>
+                  {canReopenAfterProviderError ? (
+                    <button
+                      className="mt-4 h-11 border border-[#f7f1e8]/45 px-5 text-sm text-[#fff8ed] transition hover:border-[#fff8ed] hover:bg-[#fff8ed]/5"
+                      disabled={isLoading}
+                      onClick={loadQr}
+                      type="button"
+                    >
+                      {modalCopy.refreshQr}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+
+              {phase === "error" ? (
+                <>
+                  <p className="text-lg text-[#fff8ed]">{modalCopy.errorBody}</p>
+                  <p className="mt-3 max-w-sm text-sm leading-6 text-[#9b9388]">
+                    {modalCopy.errorHelp}
+                  </p>
+                  <button
+                    className="mt-8 h-11 border border-[#f7f1e8]/45 px-5 text-sm text-[#fff8ed] transition hover:border-[#fff8ed] hover:bg-[#fff8ed]/5"
+                    onClick={loadQr}
+                    type="button"
+                  >
+                    {modalCopy.retry}
+                  </button>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </main>
   );
 }
