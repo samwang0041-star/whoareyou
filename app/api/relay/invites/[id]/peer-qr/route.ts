@@ -46,9 +46,13 @@ export async function POST(request: Request, context: RouteContext) {
     config.PROVIDER_MODE === "openclaw"
       ? await getOpenClawWeixinEntryQr(origin, config)
       : await fakeOpenClaw.getEntryQr(origin);
+  const bBotSession = await prisma.openClawBotSession.findUniqueOrThrow({
+    where: { qrcode: bQr.sessionId },
+    select: { id: true },
+  });
   await issueRelayPeerQr({
     inviteId: id,
-    bBotSessionId: bQr.sessionId,
+    bBotSessionId: bBotSession.id,
     now: new Date(),
   });
 

@@ -26,6 +26,9 @@ async function cleanDatabase() {
   await prisma.messageOutbox.deleteMany();
   await prisma.pairBlock.deleteMany();
   await prisma.connection.deleteMany();
+  await prisma.relayConnection.deleteMany();
+  await prisma.relayParticipant.deleteMany();
+  await prisma.relayInvite.deleteMany();
   await prisma.userProviderRef.deleteMany();
   await prisma.user.deleteMany();
   await prisma.openClawBotSession.deleteMany();
@@ -567,6 +570,116 @@ describe("openclaw weixin runtime contract", () => {
       recipientUserId: user.id,
       idempotencyKey: "openclaw-weixin:qr-session:msg-1:help",
     });
+  });
+
+  it("routes updates through private relay without creating random matches or outbox rows", async () => {
+    const aSession = await prisma.openClawBotSession.create({
+      data: {
+        qrcode: "relay-a-session",
+        status: "confirmed",
+        botTokenCiphertext: encryptProviderCredential("a-bot-token", testCredentialKey),
+        baseUrl: "https://bot-base.weixin.qq.com",
+        ilinkUserId: encryptProviderCredential("a-uin", testCredentialKey),
+        getUpdatesBuf: encryptProviderCredential("a-previous-buffer", testCredentialKey),
+        expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+      },
+    });
+    const bSession = await prisma.openClawBotSession.create({
+      data: {
+        qrcode: "relay-b-session",
+        status: "confirmed",
+        botTokenCiphertext: encryptProviderCredential("b-bot-token", testCredentialKey),
+        baseUrl: "https://bot-base.weixin.qq.com",
+        ilinkUserId: encryptProviderCredential("b-uin", testCredentialKey),
+        getUpdatesBuf: encryptProviderCredential("b-previous-buffer", testCredentialKey),
+        expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+      },
+    });
+    const invite = await prisma.relayInvite.create({
+      data: {
+        state: "connected",
+        aBotSessionId: aSession.id,
+        bBotSessionId: bSession.id,
+        expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+        connectedAt: now,
+      },
+    });
+    await prisma.relayConnection.create({
+      data: {
+        inviteId: invite.id,
+        state: "active",
+        startedAt: now,
+      },
+    });
+    await prisma.relayParticipant.createMany({
+      data: [
+        {
+          inviteId: invite.id,
+          role: "a",
+          provider: "openclaw-weixin",
+          providerUserHash: hashProviderUserId("relay-provider-a"),
+          providerUserIdCiphertext: encryptProviderCredential("relay-provider-a", testCredentialKey),
+          botSessionId: aSession.id,
+          joinedAt: now,
+        },
+        {
+          inviteId: invite.id,
+          role: "b",
+          provider: "openclaw-weixin",
+          providerUserHash: hashProviderUserId("relay-provider-b"),
+          providerUserIdCiphertext: encryptProviderCredential("relay-provider-b", testCredentialKey),
+          latestContextTokenCiphertext: encryptProviderCredential("b-context-token", testCredentialKey),
+          botSessionId: bSession.id,
+          joinedAt: now,
+        },
+      ],
+    });
+    const sendFetch = vi.fn(async () => new Response(JSON.stringify({ ret: 0 }), { status: 200 }));
+    vi.stubGlobal("fetch", sendFetch);
+
+    await withEnv(
+      {
+        PRODUCT_MODE: "private_relay",
+        PROVIDER_MODE: "openclaw",
+        PROVIDER_USER_HASH_SECRET: testProviderHashKey,
+        PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: testCredentialKey,
+        PROVIDER_REPLY_WINDOW_HOURS: "24",
+        PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE: "999",
+      },
+      () =>
+        processOpenClawUpdatesBatch({
+          now,
+          limit: 10,
+          fetchUpdates: async (input) => ({
+            nextGetUpdatesBuf: `${input.sessionId}:next-buffer`,
+            messages: input.sessionId === "relay-a-session"
+              ? [
+                  {
+                    event: {
+                      providerMessageKey: "openclaw-weixin:relay-a-session:msg-1",
+                      providerUserId: "relay-provider-a",
+                      text: "hello through relay",
+                      receivedAt: now,
+                    },
+                    contextToken: "a-context-token",
+                  },
+                ]
+              : [],
+          }),
+        }),
+    );
+
+    expect(sendFetch).toHaveBeenCalledTimes(1);
+    expect(fetchJsonBody(sendFetch)).toMatchObject({
+      msg: {
+        to_user_id: "relay-provider-b",
+        context_token: "b-context-token",
+        item_list: [{ text_item: { text: "hello through relay" } }],
+      },
+    });
+    await expect(prisma.connection.count()).resolves.toBe(0);
+    await expect(prisma.user.count()).resolves.toBe(0);
+    await expect(prisma.messageOutbox.count()).resolves.toBe(0);
   });
 
   it("fails closed when the OpenClaw updates worker starts without required secrets", async () => {

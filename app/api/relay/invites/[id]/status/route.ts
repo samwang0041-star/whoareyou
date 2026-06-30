@@ -63,7 +63,7 @@ async function getRelayInviteWebStatus(inviteId: string, now: Date) {
 async function botSessionStatus(botSessionId: string | null): Promise<EntryQrStatus | "missing"> {
   if (!botSessionId) return "missing";
   const session = await prisma.openClawBotSession.findUnique({
-    where: { qrcode: botSessionId },
+    where: { id: botSessionId },
     select: { status: true },
   });
   if (!session) return "missing";

@@ -3,6 +3,7 @@ import { fakeOpenClaw } from "../../../../src/adapters/fake-openclaw";
 import { getOpenClawWeixinEntryQr } from "../../../../src/adapters/openclaw-weixin-entry";
 import { loadQrProviderConfig } from "../../../../src/config";
 import { createRelayInvite } from "../../../../src/domain/private-relay-service";
+import { prisma } from "../../../../src/storage/prisma";
 import { enforceRateLimit } from "../../../../src/web/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -32,8 +33,12 @@ export async function POST(request: Request) {
     config.PROVIDER_MODE === "openclaw"
       ? await getOpenClawWeixinEntryQr(origin, config)
       : await fakeOpenClaw.getEntryQr(origin);
+  const aBotSession = await prisma.openClawBotSession.findUniqueOrThrow({
+    where: { qrcode: aQr.sessionId },
+    select: { id: true },
+  });
   const invite = await createRelayInvite({
-    aBotSessionId: aQr.sessionId,
+    aBotSessionId: aBotSession.id,
     now: new Date(),
     expiresAt: new Date(aQr.expiresAt),
   });
