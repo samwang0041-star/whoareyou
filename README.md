@@ -23,7 +23,7 @@
 
 ## 中文
 
-UNKNOWN 像一个被遗弃很久的微信 AI 入口。有一天，它突然传来一段陌生的声音。我以为是 agent 出了故障，后来才发现，是另一端也有人接入了。
+自从上次扫码体验功能后，UNKNOWN 像一个被我忽略了很久的微信 AI 入口。有一天，它突然传来一个陌生的声音。我以为是 agent 出了故障，后来才发现，是另一端也有人接入了。
 
 一个莫名其妙的 bug，把两个以为正在找 agent 的人接到了一起。一小时后，程序员终于修好了它。连接断开，但那次不期而遇还留着。
 
@@ -41,7 +41,7 @@ UNKNOWN 借用同一个入口，但把它交还给人：你扫码，回到微信
 
 ## English
 
-UNKNOWN feels like a long-abandoned WeChat AI entrance. One day, it returned a stranger's voice. I thought the agent had broken, then realized someone else had entered from the other side.
+Since the last scan-to-try feature, UNKNOWN felt like a WeChat AI entrance I had ignored for a long time. One day, it returned a stranger's voice. I thought the agent had broken, then realized someone else had entered from the other side.
 
 A strange bug connected two people who both thought they were reaching an agent. An hour later, the programmer finally fixed it. The connection disappeared, but the accident stayed.
 
