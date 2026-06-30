@@ -78,7 +78,8 @@ test("landing page shows a ready QR entry", async ({ page }) => {
   await expect(page.getByTestId("hero-main-visual")).toBeVisible();
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
   await expect(page.locator("body")).toContainText("一个被遗弃的入口");
-  await expect(page.locator("body")).toContainText("被我遗弃很久的微信 AI 入口");
+  await expect(page.locator("body")).toContainText("自从上次扫码体验功能后");
+  await expect(page.locator("body")).toContainText("被我忽略了很久的微信 AI 入口");
   await expect(page.locator("body")).toContainText("我以为是我的 agent 出了故障");
   await expect(page.locator("body")).toContainText("一个莫名其妙的 bug");
   await expect(page.locator("body")).toContainText("也许 bug 只会存在一小时");
@@ -108,7 +109,8 @@ test("landing page can switch between Chinese and English", async ({ page }) => 
 
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
   await expect(page.locator("body")).toContainText("an abandoned entrance");
-  await expect(page.locator("body")).toContainText("long-abandoned WeChat AI entrance");
+  await expect(page.locator("body")).toContainText("Since the last scan-to-try feature");
+  await expect(page.locator("body")).toContainText("ignored for a long time");
   await expect(page.locator("body")).toContainText("my agent had broken");
   await expect(page.locator("body")).toContainText("A strange bug connected two people");
   await expect(page.locator("body")).toContainText("Open source. No nicknames, avatars, phone numbers");

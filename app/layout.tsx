@@ -15,10 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://ai.wangyuzhao.cn"),
   title: "UNKNOWN",
-  description: "一个被遗弃很久的微信 AI 入口，突然传来一段陌生的声音。也许这个 bug 只会存在一小时。",
+  description: "自从上次扫码体验功能后，被我忽略了很久的微信 AI 入口，突然传来一个陌生的声音。",
   openGraph: {
     title: "UNKNOWN",
-    description: "一个被遗弃很久的微信 AI 入口，突然传来一段陌生的声音。",
+    description: "自从上次扫码体验功能后，被我忽略了很久的微信 AI 入口，突然传来一个陌生的声音。",
     url: "https://ai.wangyuzhao.cn/",
     siteName: "UNKNOWN",
     images: [
@@ -34,7 +34,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "UNKNOWN",
-    description: "一个被遗弃很久的微信 AI 入口，突然传来一段陌生的声音。",
+    description: "自从上次扫码体验功能后，被我忽略了很久的微信 AI 入口，突然传来一个陌生的声音。",
     images: ["/whoareyou-main-visual-abstract.png"],
   },
 };
