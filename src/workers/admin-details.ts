@@ -1,10 +1,13 @@
 import { createHmac } from "crypto";
 import type { ConnectionState, OutboxStatus, UserState } from "@prisma/client";
+import { loadProviderModeConfig } from "../config";
 import { prisma } from "../storage/prisma";
 
 const connectionListLimit = 50;
 const nearBlockThreshold = 3;
 const nearBlockFloor = 2;
+const openClawUpdatesWorkerName = "openclaw-updates";
+const baselineWorkerNames = ["outbox", "scheduled-jobs"];
 
 type AnonymousParticipant = {
   role: "A" | "B";
@@ -27,6 +30,11 @@ type OutboxSummary = {
   failed: number;
   providerWindowExpired: number;
   backlog: number;
+};
+
+type HealthOutboxSummary = OutboxSummary & {
+  oldestPendingOrRetryingCreatedAt: string | null;
+  oldestPendingOrRetryingAgeSeconds: number | null;
 };
 
 export type ConnectionListItem = {
@@ -88,7 +96,7 @@ export type HealthMetrics = {
   callbackDuplicates: number;
   callbackFailed: number;
   callbacksByStatus: Array<{ status: string; count: number }>;
-  outbox: OutboxSummary;
+  outbox: HealthOutboxSummary;
   providerWindowExpiredCount: number;
   activeAppErrors: number;
   activeAppErrorsBySeverity: Array<{ severity: string; count: number }>;
@@ -97,6 +105,7 @@ export type HealthMetrics = {
     workerName: string;
     status: string;
     lastSeenAt: string;
+    secondsSinceLastSeen: number | null;
     metadataPresent: boolean;
   }>;
 };
@@ -317,6 +326,7 @@ export async function listConnections(state?: ConnectionState): Promise<Connecti
 }
 
 export async function getHealthMetrics(): Promise<HealthMetrics> {
+  const now = new Date();
   const [
     callbackRows,
     duplicateCallbacks,
@@ -327,7 +337,7 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
   ] = await Promise.all([
     prisma.inboundDedupe.findMany({ select: { status: true, duplicateCount: true } }),
     prisma.inboundDedupe.aggregate({ _sum: { duplicateCount: true } }),
-    prisma.messageOutbox.findMany({ select: { status: true } }),
+    prisma.messageOutbox.findMany({ select: { status: true, createdAt: true } }),
     prisma.appError.count({ where: { resolvedAt: null } }),
     prisma.appError.findMany({ where: { resolvedAt: null }, select: { severity: true } }),
     prisma.workerHeartbeat.findMany({
@@ -341,10 +351,11 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
     }),
   ]);
   const callbacksByStatus = countBy(callbackRows, (row) => row.status);
-  const outbox = summarizeOutbox(outboxRows);
+  const outbox = summarizeHealthOutbox(outboxRows, now);
+  const normalizedWorkerHeartbeats = normalizeWorkerHeartbeats(workerHeartbeats, now, expectedWorkerNames());
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: now.toISOString(),
     callbacksTotal: callbackRows.length,
     callbackDuplicates: (callbacksByStatus.get("duplicate") ?? 0) + (duplicateCallbacks._sum.duplicateCount ?? 0),
     callbackFailed: callbacksByStatus.get("failed") ?? 0,
@@ -353,13 +364,8 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
     providerWindowExpiredCount: outbox.providerWindowExpired,
     activeAppErrors,
     activeAppErrorsBySeverity: toSortedCountRows(countBy(activeErrorRows, (row) => row.severity), "severity"),
-    workerHeartbeatCount: workerHeartbeats.length,
-    workerHeartbeats: workerHeartbeats.map((heartbeat) => ({
-      workerName: heartbeat.workerName,
-      status: heartbeat.status,
-      lastSeenAt: toIso(heartbeat.lastSeenAt),
-      metadataPresent: heartbeat.metadataJson !== null,
-    })),
+    workerHeartbeatCount: normalizedWorkerHeartbeats.length,
+    workerHeartbeats: normalizedWorkerHeartbeats,
   };
 }
 
@@ -464,6 +470,22 @@ function summarizeOutbox(messages: Array<{ status: OutboxStatus }>): OutboxSumma
   };
 }
 
+function summarizeHealthOutbox(
+  messages: Array<{ status: OutboxStatus; createdAt: Date }>,
+  now: Date,
+): HealthOutboxSummary {
+  const summary = summarizeOutbox(messages);
+  const oldestPendingOrRetrying = messages
+    .filter((message) => message.status === "pending" || message.status === "retrying")
+    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())[0];
+
+  return {
+    ...summary,
+    oldestPendingOrRetryingCreatedAt: oldestPendingOrRetrying ? toIso(oldestPendingOrRetrying.createdAt) : null,
+    oldestPendingOrRetryingAgeSeconds: oldestPendingOrRetrying ? elapsedSeconds(oldestPendingOrRetrying.createdAt, now) : null,
+  };
+}
+
 function summarizeCloseReasons(rows: Array<{ closeReason: string | null }>): SafetyMetrics["connectionCloseReasons"] {
   const counts = countBy(rows, (row) => row.closeReason ?? "");
   return {
@@ -472,6 +494,62 @@ function summarizeCloseReasons(rows: Array<{ closeReason: string | null }>): Saf
     reported: counts.get("reported") ?? 0,
     providerExpired: counts.get("provider_expired") ?? 0,
   };
+}
+
+function normalizeWorkerHeartbeats(
+  heartbeats: Array<{ workerName: string; status: string; lastSeenAt: Date; metadataJson: unknown }>,
+  now: Date,
+  expectedNames: string[],
+): HealthMetrics["workerHeartbeats"] {
+  const byName = new Map(heartbeats.map((heartbeat) => [heartbeat.workerName, heartbeat]));
+  const names = [
+    ...expectedNames,
+    ...heartbeats
+      .map((heartbeat) => heartbeat.workerName)
+      .filter((workerName) => !expectedNames.includes(workerName))
+      .sort(),
+  ];
+
+  return names.map((workerName) => {
+    const heartbeat = byName.get(workerName);
+    if (!heartbeat) {
+      return {
+        workerName,
+        status: "missing",
+        lastSeenAt: "",
+        secondsSinceLastSeen: null,
+        metadataPresent: false,
+      };
+    }
+
+    const secondsSinceLastSeen = elapsedSeconds(heartbeat.lastSeenAt, now);
+    return {
+      workerName,
+      status: workerHealthStatus(heartbeat.status, secondsSinceLastSeen),
+      lastSeenAt: toIso(heartbeat.lastSeenAt),
+      secondsSinceLastSeen,
+      metadataPresent: heartbeat.metadataJson !== null,
+    };
+  });
+}
+
+function expectedWorkerNames(): string[] {
+  return loadProviderModeConfig().PROVIDER_MODE === "openclaw" ? [openClawUpdatesWorkerName, ...baselineWorkerNames] : baselineWorkerNames;
+}
+
+function workerHealthStatus(status: string, secondsSinceLastSeen: number): string {
+  if (status === "running") return secondsSinceLastSeen > envInt("WORKER_HEARTBEAT_STALE_SECONDS", 60) ? "stale" : "ok";
+  if (status !== "ok") return "down";
+  return secondsSinceLastSeen > envInt("WORKER_HEARTBEAT_STALE_SECONDS", 60) ? "stale" : "ok";
+}
+
+function elapsedSeconds(from: Date, to: Date): number {
+  return Math.max(0, Math.floor((to.getTime() - from.getTime()) / 1000));
+}
+
+function envInt(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 function countBy<T>(items: T[], getKey: (item: T) => string): Map<string, number> {

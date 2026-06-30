@@ -1,15 +1,33 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { createHash, createHmac } from "crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findOrCreateUserFromInbound, hashProviderUserId } from "../../src/domain/identity";
 import { prisma } from "../../src/storage/prisma";
 
 describe("identity", () => {
   beforeEach(async () => {
+    vi.stubEnv("PROVIDER_USER_HASH_SECRET", "identity-test-provider-hash-secret");
     await prisma.echo.deleteMany();
     await prisma.report.deleteMany();
     await prisma.messageOutbox.deleteMany();
     await prisma.connection.deleteMany();
     await prisma.scheduledJob.deleteMany();
     await prisma.user.deleteMany();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("hashes provider user ids with the dedicated HMAC secret", () => {
+    const providerUserId = "wechat-openclaw-user-secret-check";
+    const expectedHmac = createHmac("sha256", "identity-test-provider-hash-secret").update(providerUserId).digest("hex");
+    const bareSha = createHash("sha256").update(providerUserId).digest("hex");
+
+    expect(hashProviderUserId(providerUserId)).toBe(expectedHmac);
+    expect(hashProviderUserId(providerUserId)).not.toBe(bareSha);
+
+    vi.stubEnv("ADMIN_TOKEN", "different-admin-token");
+    expect(hashProviderUserId(providerUserId)).toBe(expectedHmac);
   });
 
   it("stores only a hash of provider identity and refreshes reachability", async () => {
@@ -23,8 +41,8 @@ describe("identity", () => {
     expect(user.providerUserHash).toBe(hashProviderUserId("wechat-openclaw-user-1"));
     expect(user.providerUserHash).not.toContain("wechat-openclaw-user-1");
     expect(user.reachableUntil?.toISOString()).toBe("2026-06-30T10:00:00.000Z");
-    expect(user.matchingEnabled).toBe(true);
-    expect(user.state).toBe("available");
+    expect(user.matchingEnabled).toBe(false);
+    expect(user.state).toBe("new");
     const jobs = await prisma.scheduledJob.findMany({ orderBy: { idempotencyKey: "asc" } });
     expect(
       jobs.map((job) => ({

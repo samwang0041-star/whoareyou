@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import type { ConnectionState, UserState } from "@prisma/client";
 import { prisma } from "../storage/prisma";
+import { decideCapacityState } from "./capacity";
 import { voice } from "./voice";
 
 const activeConnectionStates: ConnectionState[] = ["active", "ending"];
@@ -13,16 +14,22 @@ export type TryMatchUserInput = {
   userId: string;
   now?: Date;
   minReachableMinutesToMatch: number;
+  maxActiveConnections?: number;
+  maxWaitingUsers?: number;
+  random?: () => number;
 };
 
 export type TryMatchUserResult =
   | { status: "matched"; connectionId: string }
   | { status: "waiting" }
+  | { status: "capacity_full" }
   | { status: "not_eligible" };
 
 export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUserResult> {
   const now = input.now ?? new Date();
   const minimumReachableUntil = addMinutes(now, input.minReachableMinutesToMatch);
+  const maxActiveConnections = input.maxActiveConnections ?? envInt("MAX_ACTIVE_CONNECTIONS", 5);
+  const maxWaitingUsers = input.maxWaitingUsers ?? envInt("MAX_WAITING_USERS", 20);
 
   for (let attempt = 1; attempt <= maxMatchAttempts; attempt += 1) {
     try {
@@ -53,7 +60,27 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
             return { status: "not_eligible" };
           }
 
-          const candidates = await tx.user.findMany({
+          const activeConnections = await tx.connection.count({
+            where: { state: { in: activeConnectionStates } },
+          });
+          const waitingUsers = await countWaitingUsers(tx, currentUser.id);
+          const capacityState = decideCapacityState({
+            activeConnections,
+            waitingUsers,
+            maxActiveConnections,
+            maxWaitingUsers,
+          });
+
+          if (capacityState === "waiting") {
+            await moveUserToWaiting(tx, currentUser.id);
+            await recordCapacityEvent(tx, currentUser.id, "capacity_active_full", now);
+            return { status: "waiting" };
+          }
+          if (capacityState === "paused") {
+            return pauseForCapacity(tx, currentUser.id, now);
+          }
+
+          const candidates = shuffleCandidates(await tx.user.findMany({
             where: {
               id: { not: currentUser.id },
               state: { in: candidateStates },
@@ -62,7 +89,7 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
             },
             orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
             select: { id: true },
-          });
+          }), input.random ?? Math.random);
 
           for (const candidate of candidates) {
             if (await isPairBlocked(tx, currentUser.id, candidate.id)) continue;
@@ -83,6 +110,8 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
               data: { state: "matched" },
             });
 
+            await removeUnsentWaitingPrompts(tx, [currentUser.id, candidate.id]);
+
             await tx.scheduledJob.createMany({
               data: scheduledConnectionJobs(connection.id, now),
             });
@@ -100,10 +129,11 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
             return { status: "matched", connectionId: connection.id };
           }
 
-          await tx.user.update({
-            where: { id: currentUser.id },
-            data: { state: "waiting" },
-          });
+          if ((await countWaitingUsers(tx, currentUser.id)) >= maxWaitingUsers) {
+            return pauseForCapacity(tx, currentUser.id, now);
+          }
+
+          await moveUserToWaiting(tx, currentUser.id);
           return { status: "waiting" };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -117,11 +147,61 @@ export async function tryMatchUser(input: TryMatchUserInput): Promise<TryMatchUs
   return readPostRaceResult(input.userId);
 }
 
+export async function matchWaitingUsers(input: {
+  now?: Date;
+  limit?: number;
+  minReachableMinutesToMatch?: number;
+  maxActiveConnections?: number;
+  maxWaitingUsers?: number;
+} = {}): Promise<{ attempted: number; matched: number }> {
+  const now = input.now ?? new Date();
+  const minReachableMinutesToMatch = input.minReachableMinutesToMatch ?? envInt("MIN_REACHABLE_MINUTES_TO_MATCH", 70);
+  const maxActiveConnections = input.maxActiveConnections ?? envInt("MAX_ACTIVE_CONNECTIONS", 5);
+  const maxWaitingUsers = input.maxWaitingUsers ?? envInt("MAX_WAITING_USERS", 20);
+  const minimumReachableUntil = addMinutes(now, minReachableMinutesToMatch);
+  const users = await prisma.user.findMany({
+    where: {
+      state: "waiting",
+      matchingEnabled: true,
+      reachableUntil: { gte: minimumReachableUntil },
+    },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    select: { id: true },
+    take: input.limit ?? maxWaitingUsers,
+  });
+
+  let attempted = 0;
+  let matched = 0;
+  for (const user of users) {
+    const result = await tryMatchUser({
+      userId: user.id,
+      now,
+      minReachableMinutesToMatch,
+      maxActiveConnections,
+      maxWaitingUsers,
+    });
+    attempted += 1;
+    if (result.status === "matched") matched += 1;
+  }
+
+  return { attempted, matched };
+}
+
 function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60_000);
 }
 
 type MatchingTransaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+type MatchingCandidate = { id: string };
+
+function shuffleCandidates<T extends MatchingCandidate>(candidates: T[], random: () => number): T[] {
+  const shuffled = [...candidates];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  return shuffled;
+}
 
 async function hasActiveStateConnection(tx: MatchingTransaction, userId: string): Promise<boolean> {
   const activeConnection = await tx.connection.findFirst({
@@ -132,6 +212,56 @@ async function hasActiveStateConnection(tx: MatchingTransaction, userId: string)
     select: { id: true },
   });
   return activeConnection !== null;
+}
+
+async function countWaitingUsers(tx: MatchingTransaction, currentUserId: string): Promise<number> {
+  return tx.user.count({
+    where: {
+      id: { not: currentUserId },
+      state: "waiting",
+      matchingEnabled: true,
+    },
+  });
+}
+
+async function moveUserToWaiting(tx: MatchingTransaction, userId: string) {
+  await tx.user.update({
+    where: { id: userId },
+    data: { state: "waiting" },
+  });
+}
+
+async function removeUnsentWaitingPrompts(tx: MatchingTransaction, userIds: string[]) {
+  await tx.messageOutbox.deleteMany({
+    where: {
+      recipientUserId: { in: userIds },
+      connectionId: null,
+      status: { in: ["pending", "retrying"] },
+      idempotencyKey: { endsWith: ":waiting" },
+    },
+  });
+}
+
+async function pauseForCapacity(tx: MatchingTransaction, userId: string, now: Date): Promise<TryMatchUserResult> {
+  await tx.user.update({
+    where: { id: userId },
+    data: {
+      state: "paused",
+      matchingEnabled: false,
+    },
+  });
+  await recordCapacityEvent(tx, userId, "capacity_waiting_full", now);
+  return { status: "capacity_full" };
+}
+
+async function recordCapacityEvent(tx: MatchingTransaction, userId: string, eventType: string, createdAt: Date) {
+  await tx.rateLimitEvent.create({
+    data: {
+      userId,
+      eventType,
+      createdAt,
+    },
+  });
 }
 
 async function isPairBlocked(tx: MatchingTransaction, userAId: string, userBId: string): Promise<boolean> {
@@ -160,11 +290,24 @@ async function readPostRaceResult(userId: string): Promise<TryMatchUserResult> {
   });
 
   if (!user) return { status: "not_eligible" };
+  if (user.state === "waiting") return { status: "waiting" };
+  if (user.state === "paused" && await hasCapacityPauseEvent(user.id)) return { status: "capacity_full" };
   if (!candidateStates.includes(user.state)) return { status: "not_eligible" };
   if (!user.matchingEnabled) return { status: "not_eligible" };
   if (await hasActiveStateConnection(prisma, user.id)) return { status: "not_eligible" };
 
   return { status: "not_eligible" };
+}
+
+async function hasCapacityPauseEvent(userId: string): Promise<boolean> {
+  const capacityEvent = await prisma.rateLimitEvent.findFirst({
+    where: {
+      userId,
+      eventType: "capacity_waiting_full",
+    },
+    select: { id: true },
+  });
+  return capacityEvent !== null;
 }
 
 function isRetryableMatchRace(error: unknown): boolean {
@@ -209,4 +352,9 @@ function scheduledConnectionJobs(connectionId: string, now: Date) {
     runAt: addMinutes(now, job.minutes),
     idempotencyKey: `${job.type}:${connectionId}`,
   }));
+}
+
+function envInt(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }

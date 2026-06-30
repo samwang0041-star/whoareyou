@@ -18,13 +18,16 @@
     "worker:scheduled": "tsx src/workers/scheduled-jobs.ts",
     "worker:scheduled:loop": "WORKER_LOOP=1 tsx src/workers/scheduled-jobs.ts",
     "worker:outbox": "tsx src/workers/outbox.ts",
-    "worker:outbox:loop": "WORKER_LOOP=1 tsx src/workers/outbox.ts"
+    "worker:outbox:loop": "WORKER_LOOP=1 tsx src/workers/outbox.ts",
+    "worker:openclaw-updates": "tsx src/workers/openclaw-updates.ts",
+    "worker:openclaw-updates:loop": "WORKER_LOOP=1 tsx src/workers/openclaw-updates.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "next": "16.2.9",
     "pg": "^8.22.0",
+    "qrcode": "^1.5.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "zod": "^4.4.3"
@@ -34,6 +37,7 @@
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.3",

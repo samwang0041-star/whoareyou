@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { hashProviderUserId } from "../../src/domain/identity";
+import { decodeOutboxBody } from "../../src/domain/outbox-body";
 import { prisma } from "../../src/storage/prisma";
 
 async function cleanDatabase() {
@@ -81,13 +82,16 @@ test("fake users can enter, match, and relay one human message", async ({ reques
   expect(sender).toBeDefined();
   expect(recipient).toBeDefined();
 
-  await expect(
-    prisma.messageOutbox.findUniqueOrThrow({
-      where: { idempotencyKey: `e2e-a-message-${suffix}:relay` },
-    }),
-  ).resolves.toMatchObject({
+  const relay = await prisma.messageOutbox.findUniqueOrThrow({
+    where: { idempotencyKey: `e2e-a-message-${suffix}:relay` },
+  });
+  expect(relay).toMatchObject({
     connectionId: connection.id,
     recipientUserId: recipient?.id,
-    bodyCiphertextOrBody: "今天你为什么会扫进来？",
+  });
+  expect(relay.bodyCiphertextOrBody).not.toContain("今天你为什么会扫进来？");
+  expect(decodeOutboxBody(relay.bodyCiphertextOrBody ?? "")).toEqual({
+    body: "今天你为什么会扫进来？",
+    encrypted: true,
   });
 });

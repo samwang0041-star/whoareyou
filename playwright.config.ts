@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const reuseExistingServer = !process.env.DATABASE_URL;
+const reuseExistingServer = process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === "1" || !process.env.DATABASE_URL;
 
 export default defineConfig({
   testDir: "tests/e2e",
@@ -11,6 +11,11 @@ export default defineConfig({
   },
   webServer: {
     command: "npm run dev",
+    env: {
+      ...process.env,
+      PROVIDER_MODE: "fake",
+      ALLOW_FAKE_PROVIDER: "1",
+    },
     url: "http://127.0.0.1:3000",
     reuseExistingServer,
     timeout: 120000,

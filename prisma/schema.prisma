@@ -84,9 +84,57 @@ model User {
   reportsMade         Report[]        @relation("Reporter")
   reportsReceived     Report[]        @relation("Reported")
   echoes              Echo[]
+  providerRefs        UserProviderRef[]
 
   @@index([state, updatedAt])
   @@index([matchingEnabled, reachableUntil, state])
+}
+
+model OpenClawBotSession {
+  id                       String   @id @default(cuid())
+  qrcode                   String   @unique
+  providerQrcodeCiphertext String?
+  providerQrcodeHash       String?
+  status                   String   @default("waiting_to_scan")
+  botTokenCiphertext       String?
+  ilinkBotId               String?
+  ilinkBotHash             String?
+  baseUrl                  String?
+  ilinkUserId              String?
+  ilinkUserHash            String?
+  getUpdatesBuf            String?
+  redirectHost             String?
+  providerError            String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  expiresAt                DateTime
+  confirmedAt              DateTime?
+  providerRefs             UserProviderRef[]
+
+  @@index([status, updatedAt])
+  @@index([expiresAt])
+  @@index([providerQrcodeHash])
+  @@index([ilinkUserHash, ilinkBotHash])
+}
+
+model UserProviderRef {
+  id                           String   @id @default(cuid())
+  userId                       String
+  provider                     String
+  providerUserHash             String
+  providerUserIdCiphertext     String
+  latestContextTokenCiphertext String?
+  botSessionId                 String
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  botSession OpenClawBotSession @relation(fields: [botSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, userId])
+  @@unique([provider, providerUserHash])
+  @@index([userId])
+  @@index([botSessionId])
 }
 
 model Connection {
@@ -250,4 +298,5 @@ model MetricSnapshot {
   errorCount                 Int
 
   @@index([bucketStart])
+  @@unique([bucketStart, bucketSize])
 }

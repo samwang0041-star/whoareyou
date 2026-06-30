@@ -13,8 +13,30 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "你是谁",
-  description: "扫码，遇见一个陌生人。",
+  metadataBase: new URL("https://ai.wangyuzhao.cn"),
+  title: "UNKNOWN",
+  description: "一个 AI 爱好者的小玩具：扫码，把这个微信入口留给一个也停下来的人。",
+  openGraph: {
+    title: "UNKNOWN",
+    description: "扫码，把这个微信入口留给一个也停下来的人。",
+    url: "https://ai.wangyuzhao.cn/",
+    siteName: "UNKNOWN",
+    images: [
+      {
+        url: "/whoareyou-main-visual.png",
+        width: 1792,
+        height: 1024,
+        alt: "UNKNOWN main visual",
+      },
+    ],
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "UNKNOWN",
+    description: "扫码，把这个微信入口留给一个也停下来的人。",
+    images: ["/whoareyou-main-visual.png"],
+  },
 };
 
 export default function RootLayout({

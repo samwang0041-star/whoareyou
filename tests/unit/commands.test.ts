@@ -7,6 +7,7 @@ describe("parseCommand", () => {
     expect(parseCommand("继续")).toEqual({ kind: "continue" });
     expect(parseCommand("暂停")).toEqual({ kind: "pause" });
     expect(parseCommand("离开")).toEqual({ kind: "leave" });
+    expect(parseCommand("确认离开")).toEqual({ kind: "confirm_leave" });
     expect(parseCommand("举报")).toEqual({ kind: "report", reason: "user_requested" });
     expect(parseCommand("帮助")).toEqual({ kind: "help" });
   });

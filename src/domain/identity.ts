@@ -1,9 +1,11 @@
-import { createHash } from "crypto";
+import { createHmac } from "crypto";
 import { prisma } from "../storage/prisma";
 import { computeReachability } from "./provider-policy";
 
+export const providerUserHashDevelopmentSecret = "whoareyou-dev-provider-user-hash-secret";
+
 export function hashProviderUserId(providerUserId: string): string {
-  return createHash("sha256").update(providerUserId).digest("hex");
+  return createHmac("sha256", providerUserHashSecret()).update(providerUserId).digest("hex");
 }
 
 export async function findOrCreateUserFromInbound(input: {
@@ -29,14 +31,13 @@ export async function findOrCreateUserFromInbound(input: {
             lastUserMessageAt: reachability.lastUserMessageAt,
             reachableUntil: reachability.reachableUntil,
             providerSendQuota: reachability.providerSendQuota,
-            ...(input.preserveExistingState ? {} : { matchingEnabled: true, state: "available" as const }),
           },
         })
       : await tx.user.create({
           data: {
             providerUserHash,
-            state: "available",
-            matchingEnabled: true,
+            state: "new",
+            matchingEnabled: false,
             lastSeenAt: input.receivedAt,
             lastUserMessageAt: reachability.lastUserMessageAt,
             reachableUntil: reachability.reachableUntil,
@@ -90,4 +91,13 @@ async function upsertReachabilityJob(
 function reachabilityRenewalRunAt(reachableUntil: Date): Date {
   const promptBeforeMinutes = Number(process.env.REACHABILITY_RENEWAL_PROMPT_BEFORE_MINUTES ?? 60);
   return new Date(reachableUntil.getTime() - promptBeforeMinutes * 60_000);
+}
+
+function providerUserHashSecret(): string {
+  const secret = process.env.PROVIDER_USER_HASH_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("PROVIDER_USER_HASH_SECRET is required");
+  }
+  return providerUserHashDevelopmentSecret;
 }
