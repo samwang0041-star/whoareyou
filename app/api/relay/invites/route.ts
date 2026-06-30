@@ -16,6 +16,7 @@ export async function POST(request: Request) {
     process.env.RATE_LIMIT_RELAY_INVITE_WINDOW_MS,
     5,
     10_000,
+    { scope: "relay-invite" },
   );
   if (!decision.allowed) {
     return NextResponse.json(

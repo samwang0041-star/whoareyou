@@ -48,11 +48,12 @@ export function enforceRateLimit(
   envWindowMs: string | undefined,
   defaultLimit: number,
   defaultWindowMs: number,
-  now: number = Date.now(),
+  options: { now?: number; scope?: string } = {},
 ): RateLimitDecision {
+  const now = options.now ?? Date.now();
   const limit = positiveInt(envLimit, defaultLimit);
   const windowMs = positiveInt(envWindowMs, defaultWindowMs);
-  const key = `ip:${getClientIp(request) || "unknown"}`;
+  const key = `${options.scope ?? "default"}:ip:${getClientIp(request) || "unknown"}`;
   return checkRateLimit(key, limit, windowMs, now);
 }
 

@@ -17,6 +17,23 @@ async function cleanDatabase() {
   await prisma.openClawBotSession.deleteMany();
 }
 
+async function withEnv<T>(updates: Record<string, string>, run: () => Promise<T>): Promise<T> {
+  const previous = new Map(Object.keys(updates).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, updates);
+
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 describe("private relay routes", () => {
   beforeEach(async () => {
     resetRateLimitsForTest();
@@ -79,5 +96,55 @@ describe("private relay routes", () => {
       state: "connected",
     });
     await expect(prisma.relayConnection.count()).resolves.toBe(1);
+  });
+
+  it("rate-limits relay status polling without consuming peer QR capacity", async () => {
+    await withEnv(
+      {
+        RATE_LIMIT_RELAY_STATUS_PER_WINDOW: "2",
+        RATE_LIMIT_RELAY_STATUS_WINDOW_MS: "10000",
+        RATE_LIMIT_RELAY_PEER_QR_PER_WINDOW: "1",
+        RATE_LIMIT_RELAY_PEER_QR_WINDOW_MS: "10000",
+      },
+      async () => {
+        const headers = { "x-forwarded-for": "203.0.113.77" };
+        const createResponse = await createRelayInvite(
+          new Request("http://local.test/api/relay/invites", { method: "POST", headers }),
+        );
+        const created = await createResponse.json();
+        const context: RouteContext = { params: { id: created.inviteId } };
+
+        await fakeScan(new Request(created.aQr.qr.payloadUrl, { headers }));
+
+        const firstStatus = await getRelayInviteStatus(
+          new Request(`http://local.test/api/relay/invites/${created.inviteId}/status`, { headers }),
+          context,
+        );
+        const secondStatus = await getRelayInviteStatus(
+          new Request(`http://local.test/api/relay/invites/${created.inviteId}/status`, { headers }),
+          context,
+        );
+        const thirdStatus = await getRelayInviteStatus(
+          new Request(`http://local.test/api/relay/invites/${created.inviteId}/status`, { headers }),
+          context,
+        );
+
+        expect(firstStatus.status).toBe(200);
+        expect(secondStatus.status).toBe(200);
+        expect(thirdStatus.status).toBe(429);
+        await expect(thirdStatus.json()).resolves.toEqual({ error: "rate_limited" });
+
+        const peerQrResponse = await issueRelayPeerQrRoute(
+          new Request(`http://local.test/api/relay/invites/${created.inviteId}/peer-qr`, { method: "POST", headers }),
+          context,
+        );
+
+        expect(peerQrResponse.status).toBe(200);
+        await expect(peerQrResponse.json()).resolves.toMatchObject({
+          state: "waiting_for_b_scan",
+          bQr: { mode: "fake" },
+        });
+      },
+    );
   });
 });

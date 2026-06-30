@@ -5,6 +5,7 @@ import {
   markRelayBConfirmed,
 } from "../../../../../../src/domain/private-relay-service";
 import { prisma } from "../../../../../../src/storage/prisma";
+import { enforceRateLimit } from "../../../../../../src/web/rate-limit";
 
 type RouteContext = {
   params: { id: string } | Promise<{ id: string }>;
@@ -13,7 +14,28 @@ type RouteContext = {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
+  const decision = enforceRateLimit(
+    request,
+    process.env.RATE_LIMIT_RELAY_STATUS_PER_WINDOW,
+    process.env.RATE_LIMIT_RELAY_STATUS_WINDOW_MS,
+    30,
+    10_000,
+    { scope: "relay-status" },
+  );
+  if (!decision.allowed) {
+    return NextResponse.json(
+      { error: "rate_limited" },
+      {
+        status: 429,
+        headers: {
+          "Cache-Control": "no-store",
+          "Retry-After": String(Math.ceil(decision.retryAfterMs / 1000)),
+        },
+      },
+    );
+  }
+
   const { id } = await context.params;
   const status = await getRelayInviteWebStatus(id, new Date());
   if (!status) {

@@ -20,6 +20,7 @@ export async function POST(request: Request, context: RouteContext) {
     process.env.RATE_LIMIT_RELAY_PEER_QR_WINDOW_MS,
     5,
     10_000,
+    { scope: "relay-peer-qr" },
   );
   if (!decision.allowed) {
     return NextResponse.json(

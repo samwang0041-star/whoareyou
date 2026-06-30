@@ -17,6 +17,9 @@ async function cleanDatabase() {
   await prisma.rateLimitEvent.deleteMany();
   await prisma.inboundDedupe.deleteMany();
   await prisma.userProviderRef.deleteMany();
+  await prisma.relayConnection.deleteMany();
+  await prisma.relayParticipant.deleteMany();
+  await prisma.relayInvite.deleteMany();
   await prisma.openClawBotSession.deleteMany();
   await prisma.pairBlock.deleteMany();
   await prisma.connection.deleteMany();
@@ -145,6 +148,7 @@ describe("scheduled jobs", () => {
         ENTITY_CLEANUP_INBOUND_DEDUPE_RETENTION_HOURS: "24",
         ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS: "24",
         ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS: "24",
+        ENTITY_CLEANUP_RELAY_INVITE_RETENTION_HOURS: "24",
       },
       async () => {
         const staleSessionCutoff = new Date("2026-06-28T10:00:00.000Z");
@@ -204,6 +208,56 @@ describe("scheduled jobs", () => {
         await prisma.rateLimitEvent.create({
           data: { userId: "ignored", eventType: "cleanup-fresh-event", createdAt: now },
         });
+        const staleRelay = await prisma.relayInvite.create({
+          data: {
+            state: "closed",
+            expiresAt: staleSessionCutoff,
+            updatedAt: staleSessionCutoff,
+            closedAt: staleSessionCutoff,
+            closeReason: "disconnected",
+          },
+        });
+        await prisma.relayParticipant.create({
+          data: {
+            inviteId: staleRelay.id,
+            role: "a",
+            provider: "fake",
+            providerUserHash: "cleanup-stale-relay-participant",
+            providerUserIdCiphertext: "ciphertext",
+            botSessionId: "cleanup-stale-relay-bot",
+          },
+        });
+        await prisma.relayConnection.create({
+          data: {
+            inviteId: staleRelay.id,
+            state: "closed",
+            startedAt: staleSessionCutoff,
+            closedAt: staleSessionCutoff,
+            closeReason: "disconnected",
+          },
+        });
+        const abandonedRelay = await prisma.relayInvite.create({
+          data: {
+            state: "b_qr_issued",
+            expiresAt: staleSessionCutoff,
+            updatedAt: staleSessionCutoff,
+          },
+        });
+        const connectedRelay = await prisma.relayInvite.create({
+          data: {
+            state: "connected",
+            expiresAt: staleSessionCutoff,
+            updatedAt: staleSessionCutoff,
+            connectedAt: staleSessionCutoff,
+          },
+        });
+        const freshRelay = await prisma.relayInvite.create({
+          data: {
+            state: "a_qr_issued",
+            expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+            updatedAt: recentSessionCutoff,
+          },
+        });
 
         await prisma.scheduledJob.create({
           data: { type: "entity_cleanup", runAt: now, idempotencyKey: "test-entity-cleanup" },
@@ -221,6 +275,13 @@ describe("scheduled jobs", () => {
 
         const remainingEvents = await prisma.rateLimitEvent.findMany({ select: { eventType: true } });
         expect(remainingEvents.map((row) => row.eventType).sort()).toEqual(["cleanup-fresh-event"]);
+
+        const remainingRelays = await prisma.relayInvite.findMany({ select: { id: true } });
+        expect(remainingRelays.map((row) => row.id).sort()).toEqual([connectedRelay.id, freshRelay.id].sort());
+
+        await expect(prisma.relayInvite.findUnique({ where: { id: abandonedRelay.id } })).resolves.toBeNull();
+        await expect(prisma.relayParticipant.count({ where: { providerUserHash: "cleanup-stale-relay-participant" } })).resolves.toBe(0);
+        await expect(prisma.relayConnection.count({ where: { inviteId: staleRelay.id } })).resolves.toBe(0);
       },
     );
   });

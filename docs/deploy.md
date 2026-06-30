@@ -20,6 +20,7 @@ PostgreSQL is the source of truth. Do not run without a managed PostgreSQL datab
 ```text
 DATABASE_URL=postgresql://...
 ADMIN_TOKEN=<long random admin token>
+PRODUCT_MODE=private_relay
 PROVIDER_MODE=openclaw
 PROVIDER_USER_HASH_SECRET=<long random hash secret>
 PROVIDER_CREDENTIAL_ENCRYPTION_SECRET=<long random credential secret>
@@ -53,6 +54,7 @@ ENTITY_CLEANUP_SESSION_RETENTION_HOURS=24
 ENTITY_CLEANUP_INBOUND_DEDUPE_RETENTION_HOURS=168
 ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS=720
 ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS=168
+ENTITY_CLEANUP_RELAY_INVITE_RETENTION_HOURS=24
 ADMIN_LOGIN_MAX_FAILS=5
 ADMIN_LOGIN_LOCK_MS=900000
 ADMIN_ALLOWED_IPS=
@@ -60,18 +62,24 @@ RATE_LIMIT_QR_PER_WINDOW=1
 RATE_LIMIT_QR_WINDOW_MS=10000
 RATE_LIMIT_QR_STATUS_PER_WINDOW=30
 RATE_LIMIT_QR_STATUS_WINDOW_MS=10000
+RATE_LIMIT_RELAY_INVITE_PER_WINDOW=5
+RATE_LIMIT_RELAY_INVITE_WINDOW_MS=10000
+RATE_LIMIT_RELAY_STATUS_PER_WINDOW=30
+RATE_LIMIT_RELAY_STATUS_WINDOW_MS=10000
+RATE_LIMIT_RELAY_PEER_QR_PER_WINDOW=5
+RATE_LIMIT_RELAY_PEER_QR_WINDOW_MS=10000
 RATE_LIMIT_FAKE_CALLBACK_PER_WINDOW=10
 RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS=60000
 FAKE_CALLBACK_MAX_BODY_BYTES=16384
 ```
 
-Use strong non-default secrets in production. `ADMIN_TOKEN`, `PROVIDER_USER_HASH_SECRET`, and `PROVIDER_CREDENTIAL_ENCRYPTION_SECRET` must be separate values. Production must run with `PROVIDER_MODE=openclaw`; `PROVIDER_MODE=fake` is blocked in production, and `ALLOW_FAKE_PROVIDER` must not be set in production at all. `PROVIDER_MODE=openclaw` refuses to start without explicit provider secrets, and must not use the development secrets from `.env.example`. Never expose `ADMIN_TOKEN` to the browser except by typing it into the private admin pages. In production `ADMIN_TOKEN` must be at least 32 characters; the app refuses to start with a shorter token under `NODE_ENV=production`.
+Use strong non-default secrets in production. `ADMIN_TOKEN`, `PROVIDER_USER_HASH_SECRET`, and `PROVIDER_CREDENTIAL_ENCRYPTION_SECRET` must be separate values. The relay product must run with `PRODUCT_MODE=private_relay`; otherwise the homepage can issue relay QR codes while OpenClaw inbound messages still use the old random-matching behavior. Production must run with `PROVIDER_MODE=openclaw`; `PROVIDER_MODE=fake` is blocked in production, and `ALLOW_FAKE_PROVIDER` must not be set in production at all. `PROVIDER_MODE=openclaw` refuses to start without explicit provider secrets, and must not use the development secrets from `.env.example`. Never expose `ADMIN_TOKEN` to the browser except by typing it into the private admin pages. In production `ADMIN_TOKEN` must be at least 32 characters; the app refuses to start with a shorter token under `NODE_ENV=production`.
 
-The scheduled worker self-seeds recurring `outbox_body_cleanup`, `metric_snapshot`, and `entity_cleanup` jobs. `entity_cleanup` runs on a separate cadence controlled by `ENTITY_CLEANUP_INTERVAL_SECONDS` (default 6 hours) and prunes expired/superseded OpenClaw bot sessions, old inbound dedupe rows, resolved app errors, and old rate-limit events so tables stay bounded. Each retention window is configurable and defaults to a safe value (sessions 24h, inbound dedupe and rate-limit events 7d, resolved app errors 30d).
+The scheduled worker self-seeds recurring `outbox_body_cleanup`, `metric_snapshot`, and `entity_cleanup` jobs. `entity_cleanup` runs on a separate cadence controlled by `ENTITY_CLEANUP_INTERVAL_SECONDS` (default 6 hours) and prunes expired/superseded OpenClaw bot sessions, old inbound dedupe rows, resolved app errors, old rate-limit events, abandoned relay invites, and closed/expired relay invites so tables stay bounded. Each retention window is configurable and defaults to a safe value (sessions 24h, relay invites 24h, inbound dedupe and rate-limit events 7d, resolved app errors 30d).
 
 ### Public Endpoint Rate Limiting
 
-`/api/qr`, `/api/qr/status`, and (in fake mode) `/api/wechat/callback` are rate-limited in-process by client IP. Defaults are tuned for a single-replica MVP (`/api/qr`: 1 request per 10s, `/api/qr/status`: 30 per 10s, fake callback: 10 per 60s) and overridable via the `RATE_LIMIT_*` env vars. Fake callback bodies are capped by `FAKE_CALLBACK_MAX_BODY_BYTES`. The limiter is per-process; multi-replica deployments must replace it with a shared store and should still put a reverse-proxy `limit_req` (nginx/Caddy) in front as the primary defense.
+`/api/qr`, `/api/qr/status`, `/api/relay/invites`, `/api/relay/invites/:id/status`, `/api/relay/invites/:id/peer-qr`, and (in fake mode) `/api/wechat/callback` are rate-limited in-process by client IP and endpoint scope. Defaults are tuned for a single-replica MVP (`/api/qr`: 1 request per 10s, relay QR creation: 5 per 10s, status polling: 30 per 10s, fake callback: 10 per 60s) and overridable via the `RATE_LIMIT_*` env vars. Fake callback bodies are capped by `FAKE_CALLBACK_MAX_BODY_BYTES`. The limiter is per-process; multi-replica deployments must replace it with a shared store and should still put a reverse-proxy `limit_req` (nginx/Caddy) in front as the primary defense.
 
 ### Admin Access Control
 
@@ -95,19 +103,19 @@ Migration `000009_openclaw_provider_ref_privacy` intentionally aborts if `UserPr
 Web:
 
 ```bash
-DATABASE_URL="$DATABASE_URL" PROVIDER_MODE="openclaw" ADMIN_TOKEN="$ADMIN_TOKEN" PROVIDER_USER_HASH_SECRET="$PROVIDER_USER_HASH_SECRET" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" OPENCLAW_WEIXIN_API_BASE_URL="$OPENCLAW_WEIXIN_API_BASE_URL" OPENCLAW_WEIXIN_BOT_TYPE="$OPENCLAW_WEIXIN_BOT_TYPE" OPENCLAW_WEIXIN_CLIENT_VERSION="$OPENCLAW_WEIXIN_CLIENT_VERSION" npm run start
+DATABASE_URL="$DATABASE_URL" PRODUCT_MODE="private_relay" PROVIDER_MODE="openclaw" ADMIN_TOKEN="$ADMIN_TOKEN" PROVIDER_USER_HASH_SECRET="$PROVIDER_USER_HASH_SECRET" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" OPENCLAW_WEIXIN_API_BASE_URL="$OPENCLAW_WEIXIN_API_BASE_URL" OPENCLAW_WEIXIN_BOT_TYPE="$OPENCLAW_WEIXIN_BOT_TYPE" OPENCLAW_WEIXIN_CLIENT_VERSION="$OPENCLAW_WEIXIN_CLIENT_VERSION" npm run start
 ```
 
 Outbox worker:
 
 ```bash
-DATABASE_URL="$DATABASE_URL" PROVIDER_MODE="openclaw" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" npm run worker:outbox:loop
+DATABASE_URL="$DATABASE_URL" PRODUCT_MODE="private_relay" PROVIDER_MODE="openclaw" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" npm run worker:outbox:loop
 ```
 
 OpenClaw updates worker, required only for `PROVIDER_MODE=openclaw`:
 
 ```bash
-DATABASE_URL="$DATABASE_URL" PROVIDER_MODE="openclaw" PROVIDER_USER_HASH_SECRET="$PROVIDER_USER_HASH_SECRET" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" npm run worker:openclaw-updates:loop
+DATABASE_URL="$DATABASE_URL" PRODUCT_MODE="private_relay" PROVIDER_MODE="openclaw" PROVIDER_USER_HASH_SECRET="$PROVIDER_USER_HASH_SECRET" PROVIDER_CREDENTIAL_ENCRYPTION_SECRET="$PROVIDER_CREDENTIAL_ENCRYPTION_SECRET" npm run worker:openclaw-updates:loop
 ```
 
 Scheduled worker:
@@ -133,10 +141,11 @@ npm run worker:scheduled
 Real OpenClaw/Weixin mode uses:
 
 ```text
-GET /api/qr                       web requests QR from get_bot_qrcode
-GET /api/qr/status                web polls get_qrcode_status and persists confirmed credentials
-worker:openclaw-updates:loop      polls <baseurl>/ilink/bot/getupdates
-worker:outbox:loop                sends <baseurl>/ilink/bot/sendmessage
+POST /api/relay/invites           web requests A QR from get_bot_qrcode
+GET /api/relay/invites/:id/status web watches A/B scan progress
+POST /api/relay/invites/:id/peer-qr web requests B QR only after A is confirmed
+worker:openclaw-updates:loop      polls <baseurl>/ilink/bot/getupdates and relays user text directly in private_relay mode
+worker:outbox:loop                handles legacy/system outbox messages; user relay text must not depend on it in private_relay mode
 ```
 
 The fake/demo callback accepts normalized fake-testable payloads:
@@ -155,8 +164,11 @@ Real provider-specific parsing stays in `src/adapters/*` and `src/workers/opencl
 ## Runtime URLs
 
 ```text
-/                         public ritual entry
-/api/qr                   entry QR URL
+/                         public relay entry
+/api/relay/invites        create A QR URL
+/api/relay/invites/:id/status
+/api/relay/invites/:id/peer-qr create B QR URL
+/api/qr                   legacy entry QR URL
 /api/wechat/callback      fake/demo callback only
 /admin                    private ops overview
 /admin/health             service health
@@ -168,12 +180,13 @@ Admin pages require `ADMIN_TOKEN` and call protected APIs with `Bearer <token>`.
 
 ## Smoke Test After Deploy
 
-1. Open `/` and click `进入`; `/api/qr` should return a QR entry and status URL.
-2. In fake mode, POST two fake callback events with `text: "打开"` to `/api/wechat/callback`; a connection should become active.
-3. POST a normal message from one participant; outbox should queue a relay to the other participant.
-4. Open `/admin`, enter `ADMIN_TOKEN`, confirm overview counts and connection list render.
-5. Click a connection detail; confirm no chat text or provider identity appears.
-6. In real mode, confirm web, openclaw updates worker, outbox worker, and scheduled worker are all running and outbox backlog is not growing unexpectedly.
+1. Open `/` and click `生成入口`; `/api/relay/invites` should return A's QR and no B QR.
+2. Scan A's QR; `/api/relay/invites/:id/status` should move to `a_bound`.
+3. Request `/api/relay/invites/:id/peer-qr`; it should return B's QR image.
+4. Scan B's QR; status should move to `connected`.
+5. In `PRODUCT_MODE=private_relay`, send a normal OpenClaw inbound message from one participant; the openclaw updates worker should call provider `sendmessage` directly to the other participant without creating local chat rows.
+6. Open `/admin`, enter `ADMIN_TOKEN`, confirm overview counts and connection list render.
+7. In real mode, confirm web, openclaw updates worker, outbox worker, and scheduled worker are all running and outbox backlog is not growing unexpectedly.
 
 ## Privacy And Safety Checklist
 
