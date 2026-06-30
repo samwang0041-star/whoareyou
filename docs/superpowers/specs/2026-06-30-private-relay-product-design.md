@@ -14,12 +14,13 @@ The product is a one-to-one hidden identity relay disguised as an AI entry point
 
 1. A opens the site and gets an entry QR.
 2. A scans and binds the entry.
-3. The site gives A a private share link.
-4. A sends that link to B.
-5. B opens the link, gets their own entry QR, scans, and binds.
-6. Once both sides are bound, messages sent through the WeChat/OpenClaw AI entry are forwarded between A and B.
-7. Either side can send `/断开`.
-8. After disconnect, the relationship is gone. They cannot talk again through that link. To reconnect, someone must reopen the site, scan again, share again, and establish a new link.
+3. The page waits for A's scan confirmation before the real flow begins.
+4. After A is bound, the site generates B's entry QR image.
+5. The page guides A to hand that image to B, not to click a social share button.
+6. B scans that QR image and binds.
+7. Once both sides are bound, messages sent through the WeChat/OpenClaw AI entry are forwarded between A and B.
+8. Either side can send `/断开`.
+9. After disconnect, the relationship is gone. They cannot talk again through that image. To reconnect, someone must reopen the site, scan again, hand off a new image, and establish a new connection.
 
 This is not random matching. It is not a community. It is not anonymous social networking. It is a small, deliberate relay toy: an AI-looking entrance where the other side is actually a person, with identity hidden by the server.
 
@@ -48,14 +49,15 @@ It should feel like someone found a strange bug in an AI entrance and chose not 
 - The server should not use the existing random matching pool.
 - The server should not create one-hour reminders, cooldowns, reports, or rematch behavior for this branch.
 - The user-facing command surface is only `/断开`.
-- A share link is single-use for B and expires.
+- B's QR image is single-use in product terms and expires with the provider session.
 - A QR is short-lived and refreshable.
 - A closed or expired relationship cannot be resumed.
+- There is a real waiting gap between "A has scanned" and "B has scanned"; the UI must make that gap feel intentional instead of broken.
 
 ## Premises
 
-1. The product value is the private relay mechanism, not discovery. A chooses who gets the link.
-2. Because A already shares the link to B, abuse controls can be much smaller than the random-matching product.
+1. The product value is the private relay mechanism, not discovery. A chooses who receives the handoff image.
+2. Because A already chooses B out of band, abuse controls can be much smaller than the random-matching product.
 3. Losing an occasional message is acceptable if it lets the server avoid becoming a chat database.
 4. The existing OpenClaw credential and provider-ref infrastructure is valuable and should be reused.
 5. The existing random matching state machine is intentionally the wrong abstraction for this product.
@@ -134,7 +136,7 @@ Cons:
 
 - Breaks on deploys, restarts, multiple processes, and worker/web separation.
 - OpenClaw polling and sending already need durable provider session state.
-- A share link can become invalid for reasons users cannot understand.
+- A handoff image can become invalid for reasons users cannot understand.
 
 Reuses:
 
@@ -172,18 +174,22 @@ It is the smallest architecture that respects the product's taste. The server ke
 `GET /api/relay/invites/:inviteId/status`
 
 - Polls whether A has scanned.
-- After A is bound, returns the B share link.
+- Before A is bound, returns `a_waiting_to_scan` or `a_scan_confirming`.
+- After A is bound, issues or returns B's QR image.
+- During the gap, returns `waiting_for_b_scan` plus B QR expiry and refresh metadata.
 
-`GET /r/:shareSlug`
+`POST /api/relay/invites/:inviteId/peer-qr`
 
-- B opens A's private share link.
-- If valid and unused, creates or returns B's QR session.
-- If expired, consumed, or closed, renders a dead-link state.
+- Only valid after A is confirmed.
+- Creates B's OpenClaw QR session.
+- Returns a QR image for A to hand to B.
+- Does not expose a website share link.
 
 `GET /api/relay/invites/:inviteId/b/status`
 
 - Polls whether B has scanned.
 - Once B is bound, returns `connected`.
+- If B QR expires before scan, returns `b_qr_expired` and lets A refresh the handoff image.
 
 ### WeChat/OpenClaw Flow
 
@@ -208,21 +214,19 @@ For `private_relay`:
 Fields:
 
 - `id`
-- `shareSlug`
 - `state`: `created | a_qr_issued | a_bound | b_qr_issued | connected | closed | expired`
 - `aBotSessionId`
 - `bBotSessionId`
-- `connectionId` or `relayConnectionId`
 - `expiresAt`
 - `createdAt`
 - `updatedAt`
+- `bQrIssuedAt`
 - `connectedAt`
 - `closedAt`
 - `closeReason`: `disconnected | expired | provider_expired`
 
 Indexes:
 
-- `shareSlug` unique
 - `state, updatedAt`
 - `expiresAt`
 
@@ -291,7 +295,7 @@ Forbidden persistence:
 - normalized message body
 - excerpts
 - provider raw user id in logs
-- B share link in logs
+- provider QR payloads in logs
 
 ## Command Surface
 
@@ -306,7 +310,7 @@ Behavior:
 - Works from either side.
 - Immediately closes the relay.
 - Best-effort sends a short close message to the peer.
-- Invalidates the share link and both participant routes.
+- Invalidates the handoff QR route and both participant routes.
 - Deletes or clears active provider delivery refs after notification.
 
 All other text is treated as relay content if connected.
@@ -329,14 +333,16 @@ UNKNOWN RELAY
 QR modal states:
 
 - A QR waiting: "先用微信接入这个入口。"
-- A bound: "入口已经认得你。把这个链接交给一个人。"
-- B waiting: "对方接入后，关系才会建立。"
+- A bound: "入口已经认得你。现在生成另一张入口图。"
+- B image ready: "把这张图交给那个人。不要解释太多，让他扫。"
+- Waiting for B: "图已经交出去了。对方扫进来之前，这里会安静地等。"
 - Connected: "已经接通。回到微信说话。"
 - Expired: "这张入口已经失效。重新生成。"
 
 WeChat replies:
 
-- A bound: "我在。把页面上的链接交给那个人。"
+- A bound: "我在。回到页面，把那张入口图交给那个人。"
+- Gap: "我已经认得你了。另一个入口还没有亮起。"
 - B connected: "接通了。你们现在可以说话。发 `/断开`，关系会消失。"
 - Peer disconnected: "对方断开了。这段关系已经消失。"
 - No active relay: "这里没有正在连接的人。重新打开网站，生成新的入口。"
@@ -362,7 +368,7 @@ For this branch, admin should focus on operational health, not social moderation
 Admin must not expose:
 
 - raw provider ids
-- share slugs
+- provider QR payloads
 - raw message text
 - encrypted credential blobs
 
@@ -370,27 +376,29 @@ Admin must not expose:
 
 - Rate limit invite creation by IP.
 - Rate limit QR status polling by IP.
-- Share slug must be unguessable, at least 128 bits of entropy.
-- B link is single-use and expires.
+- B QR generation must be allowed only after A is confirmed.
+- B QR is single-use in the relay domain and expires with the OpenClaw QR session.
 - A cannot create unlimited active invites from one browser/IP in a short window.
 - A provider user cannot hold unlimited active relay roles.
 - Clamp inbound text length before sending.
 - Do not reflect inbound text into web HTML.
-- Do not include share slugs or provider refs in logs.
+- Do not include provider QR payloads or provider refs in logs.
 - Cleanup expired invites and cleared refs on a short cadence.
 - Production must keep existing `PROVIDER_MODE=openclaw` and fake-provider protections.
 
 ## Success Criteria
 
 - A can create a relay invite and scan A QR.
-- After A scan, the web page shows a share link for B.
-- B can open the share link and scan B QR.
+- Before A scan, the page never shows B's entry.
+- After A scan, the web page shows B's QR image and tells A to hand the image to B.
+- While B has not scanned, A's WeChat messages are not forwarded and receive a product-feeling waiting response.
+- B can scan B QR without opening a website share link.
 - After B scan, both sides receive connected guidance in WeChat.
 - A normal message from A is sent to B.
 - A normal message from B is sent to A.
 - Sending `/断开` from either side closes the relay.
 - After close, further messages are not forwarded.
-- The same share link cannot create a second relationship.
+- The same B QR cannot create a second relationship.
 - Raw chat message text is not persisted in PostgreSQL after relay send.
 - Relay messages do not create `MessageOutbox` rows.
 - Existing UNKNOWN random matching flow remains untouched on `main`.
@@ -402,21 +410,22 @@ Admin must not expose:
 3. Add relay domain service:
    - create invite
    - attach A
-   - issue B share link
+   - issue B QR image only after A is attached
    - attach B
+   - represent waiting-for-B gap
    - close relay
    - resolve peer route
 4. Add relay web APIs and pages:
    - `POST /api/relay/invites`
    - `GET /api/relay/invites/:id/status`
-   - `GET /r/:shareSlug`
+   - `POST /api/relay/invites/:id/peer-qr`
 5. Add `handleRelayInbound(event)` and switch `openclaw-updates` by `PRODUCT_MODE`.
 6. Add direct OpenClaw send helper that sends to a `RelayParticipant` without creating outbox rows.
 7. Add cleanup for expired relay invites and cleared refs.
 8. Add admin metrics for relay mode.
 9. Add unit tests for `/断开` parsing and relay state transitions.
 10. Add integration tests for fake provider A/B scan, relay, disconnect, expiry, and no message persistence.
-11. Add Playwright flow for the web invite/share-link path.
+11. Add Playwright flow for the web invite and B QR handoff path.
 
 ## Distribution Plan
 
@@ -433,7 +442,7 @@ The existing outbox worker is not required for user relay messages in `private_r
 
 - Product name for this branch: keep `UNKNOWN`, use `UNKNOWN RELAY`, or give it a separate name.
 - Whether provider identity may participate in multiple active relays at once. Default recommendation: no.
-- Whether to notify A inside WeChat when A has scanned but has not shared the link yet. Default recommendation: one short message only.
+- Whether to notify A inside WeChat while waiting for B's scan. Default recommendation: one short gap message only, then keep quiet.
 - Whether to deploy this at a separate domain/subpath or switch the main domain temporarily. Default recommendation: separate branch and separate deployment target until tested.
 
 ## What I Noticed
