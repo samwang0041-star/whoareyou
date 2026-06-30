@@ -55,7 +55,6 @@ async function expectRejectedCopyAbsent(page: Page) {
   const body = page.locator("body");
   await expect(body).not.toContainText("入口后面不是 AI");
   await expect(body).not.toContainText("不是 AI，不是客服");
-  await expect(body).not.toContainText("AI 入口");
   await expect(body).not.toContainText("真人相遇");
   await expect(body).not.toContainText("微信回应慢了一点");
   await expect(body).not.toContainText("二维码仍可使用");
@@ -78,12 +77,12 @@ test("landing page shows a ready QR entry", async ({ page }) => {
 
   await expect(page.getByTestId("hero-main-visual")).toBeVisible();
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
-  await expect(page.locator("body")).toContainText("AI 工具之外");
-  await expect(page.locator("body")).toContainText("不是新的 agent。");
-  await expect(page.locator("body")).toContainText("也不是匿名社交。");
-  await expect(page.locator("body")).toContainText("另一个未知的信号靠近");
-  await expect(page.locator("body")).toContainText("开源。不保存昵称、头像、手机号或明文聊天。");
-  await expect(page.locator("body")).toContainText("vibe coding 很久以后");
+  await expect(page.locator("body")).toContainText("一个被遗弃的入口");
+  await expect(page.locator("body")).toContainText("被我遗弃很久的微信 AI 入口");
+  await expect(page.locator("body")).toContainText("我以为是我的 agent 出了故障");
+  await expect(page.locator("body")).toContainText("一个莫名其妙的 bug");
+  await expect(page.locator("body")).toContainText("也许 bug 只会存在一小时");
+  await expect(page.locator("body")).toContainText("一小时后，程序员修好了它");
   await expect(page.locator("body")).toContainText("samwang0041@gmail.com");
   await expect(page.locator("body")).not.toContainText("五小时窗口、week 窗口、token 焦虑");
   await expect(page.locator("body")).not.toContainText("成了给它们做回归测试的人");
@@ -108,16 +107,16 @@ test("landing page can switch between Chinese and English", async ({ page }) => 
   await page.getByRole("button", { name: "Switch to English" }).click();
 
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
-  await expect(page.locator("body")).toContainText("outside the tools");
-  await expect(page.locator("body")).toContainText("Not another agent.");
-  await expect(page.locator("body")).toContainText("Not anonymous social.");
-  await expect(page.locator("body")).toContainText("another signal may come close");
+  await expect(page.locator("body")).toContainText("an abandoned entrance");
+  await expect(page.locator("body")).toContainText("long-abandoned WeChat AI entrance");
+  await expect(page.locator("body")).toContainText("my agent had broken");
+  await expect(page.locator("body")).toContainText("A strange bug connected two people");
   await expect(page.locator("body")).toContainText("Open source. No nicknames, avatars, phone numbers");
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
 
   await page.getByRole("button", { name: "切换到中文" }).click();
 
-  await expect(page.locator("body")).toContainText("AI 工具之外");
+  await expect(page.locator("body")).toContainText("一个被遗弃的入口");
   await expect(page.getByRole("button", { name: "进入" })).toBeVisible();
 });
 
