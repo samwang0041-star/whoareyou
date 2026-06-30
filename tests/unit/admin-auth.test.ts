@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resetAdminAuthForTest, requireAdmin } from "../../src/web/admin-auth";
+import { getAdminAuthFailureCountForTest, resetAdminAuthForTest, requireAdmin } from "../../src/web/admin-auth";
 
 const validToken = "a".repeat(40);
 
@@ -16,11 +16,13 @@ describe("admin-auth", () => {
     delete process.env.ADMIN_ALLOWED_IPS;
     delete process.env.ADMIN_LOGIN_MAX_FAILS;
     delete process.env.ADMIN_LOGIN_LOCK_MS;
+    delete process.env.ADMIN_LOGIN_FAILURE_MAX_RECORDS;
     resetAdminAuthForTest();
   });
 
   afterEach(() => {
     delete process.env.ADMIN_TOKEN;
+    delete process.env.ADMIN_LOGIN_FAILURE_MAX_RECORDS;
     resetAdminAuthForTest();
   });
 
@@ -114,5 +116,26 @@ describe("admin-auth", () => {
     delete process.env.ADMIN_ALLOWED_IPS;
     const result = requireAdmin(requestWith(`Bearer ${validToken}`, "203.0.113.99"), 3_000);
     expect(result).toEqual({ ok: true });
+  });
+
+  it("caps failed admin auth records across many IPs", () => {
+    process.env.ADMIN_LOGIN_FAILURE_MAX_RECORDS = "3";
+
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.1"), 1_000);
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.2"), 2_000);
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.3"), 3_000);
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.4"), 4_000);
+
+    expect(getAdminAuthFailureCountForTest()).toBe(3);
+  });
+
+  it("prunes expired failed admin auth records", () => {
+    process.env.ADMIN_LOGIN_LOCK_MS = "1000";
+
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.20"), 1_000);
+    expect(getAdminAuthFailureCountForTest()).toBe(1);
+
+    requireAdmin(requestWith("Bearer wrong", "203.0.113.21"), 2_500);
+    expect(getAdminAuthFailureCountForTest()).toBe(1);
   });
 });

@@ -5,6 +5,7 @@ import { prisma } from "../storage/prisma";
 
 const connectionListLimit = 50;
 const connectionDetailChildLimit = 50;
+const nearBlockListLimit = 50;
 const nearBlockThreshold = 3;
 const nearBlockFloor = 2;
 const openClawUpdatesWorkerName = "openclaw-updates";
@@ -391,10 +392,33 @@ export async function getHealthMetrics(): Promise<HealthMetrics> {
 }
 
 export async function getSafetyMetrics(): Promise<SafetyMetrics> {
-  const [totalReports, reportsByReasonRows, reportsByUserRows, blockedUsers, closeReasonRows] = await Promise.all([
+  const [totalReports, reportsByReasonRows, nearBlockCountRows, nearBlockRows, blockedUsers, closeReasonRows] = await Promise.all([
     prisma.report.count(),
     prisma.report.groupBy({ by: ["reason"], _count: { _all: true } }),
-    prisma.report.groupBy({ by: ["reportedUserId"], _count: { _all: true } }),
+    prisma.$queryRaw<{ count: number }[]>`
+      SELECT COUNT(*)::int AS count
+      FROM (
+        SELECT report."reportedUserId"
+        FROM "Report" report
+        INNER JOIN "User" reported_user ON reported_user."id" = report."reportedUserId"
+        WHERE reported_user."state" <> 'blocked'
+        GROUP BY report."reportedUserId"
+        HAVING COUNT(*) >= ${nearBlockFloor} AND COUNT(*) < ${nearBlockThreshold}
+      ) near_block
+    `,
+    prisma.$queryRaw<{ reportedUserId: string; providerUserHash: string; reportCount: number }[]>`
+      SELECT
+        report."reportedUserId" AS "reportedUserId",
+        reported_user."providerUserHash" AS "providerUserHash",
+        COUNT(*)::int AS "reportCount"
+      FROM "Report" report
+      INNER JOIN "User" reported_user ON reported_user."id" = report."reportedUserId"
+      WHERE reported_user."state" <> 'blocked'
+      GROUP BY report."reportedUserId", reported_user."providerUserHash"
+      HAVING COUNT(*) >= ${nearBlockFloor} AND COUNT(*) < ${nearBlockThreshold}
+      ORDER BY "reportCount" DESC, reported_user."providerUserHash" ASC
+      LIMIT ${nearBlockListLimit}
+    `,
     prisma.user.count({ where: { state: "blocked" } }),
     prisma.connection.groupBy({
       by: ["closeReason"],
@@ -403,27 +427,17 @@ export async function getSafetyMetrics(): Promise<SafetyMetrics> {
     }),
   ]);
 
-  const nearBlockRows = reportsByUserRows.filter((row) => row._count._all >= nearBlockFloor && row._count._all < nearBlockThreshold);
-  const nearBlockUsers = nearBlockRows.length === 0
-    ? []
-    : await prisma.user.findMany({
-        where: {
-          id: { in: nearBlockRows.map((row) => row.reportedUserId) },
-          state: { not: "blocked" },
-        },
-        select: { id: true, providerUserHash: true },
-      });
-  const nearBlockCounts = new Map(nearBlockRows.map((row) => [row.reportedUserId, row._count._all]));
-  const nearBlockReportedUsers = nearBlockUsers
-    .map((user) => ({ anonymousId: anonymousUserId(user.providerUserHash), reportCount: nearBlockCounts.get(user.id) ?? 0 }))
-    .sort((left, right) => right.reportCount - left.reportCount || left.anonymousId.localeCompare(right.anonymousId));
+  const nearBlockReportedUsers = nearBlockRows.map((row) => ({
+    anonymousId: anonymousUserId(row.providerUserHash),
+    reportCount: row.reportCount,
+  }));
 
   return {
     generatedAt: new Date().toISOString(),
     totalReports,
     blockedUsers,
     nearBlockThreshold,
-    nearBlockReportedUserCount: nearBlockReportedUsers.length,
+    nearBlockReportedUserCount: nearBlockCountRows[0]?.count ?? 0,
     nearBlockReportedUsers,
     reportsByReason: toSortedCountRows(groupCountMap(reportsByReasonRows, (row) => row.reason), "reason"),
     connectionCloseReasons: summarizeCloseReasonCounts(groupCountMap(closeReasonRows, (row) => row.closeReason ?? "")),

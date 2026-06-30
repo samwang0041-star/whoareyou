@@ -350,6 +350,7 @@ describe("openclaw weixin runtime contract", () => {
         id: "qr-session",
         qrcode: "qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         ilinkBotId: encryptProviderCredential("bot-123", testCredentialKey),
         ilinkBotHash: hashProviderCredential("bot-123", testCredentialKey),
@@ -508,6 +509,7 @@ describe("openclaw weixin runtime contract", () => {
       data: {
         qrcode: "qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         ilinkBotId: encryptProviderCredential("bot-123", testCredentialKey),
         ilinkBotHash: hashProviderCredential("bot-123", testCredentialKey),
@@ -569,6 +571,33 @@ describe("openclaw weixin runtime contract", () => {
     });
   });
 
+  it("skips legacy confirmed bot sessions without encrypted QR state", async () => {
+    await prisma.openClawBotSession.create({
+      data: {
+        qrcode: "legacy-provider-qrcode",
+        status: "confirmed",
+        botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
+        getUpdatesBuf: encryptProviderCredential("previous-buffer", testCredentialKey),
+        expiresAt: new Date("2026-06-30T12:00:00.000Z"),
+      },
+    });
+    const fetchUpdates = vi.fn(async () => ({ nextGetUpdatesBuf: "next-buffer", messages: [] }));
+
+    const result = await withEnv(
+      {
+        PROVIDER_MODE: "openclaw",
+        PROVIDER_USER_HASH_SECRET: testProviderHashKey,
+        PROVIDER_CREDENTIAL_ENCRYPTION_SECRET: testCredentialKey,
+        PROVIDER_REPLY_WINDOW_HOURS: "24",
+        PROVIDER_SEND_QUOTA_AFTER_USER_MESSAGE: "999",
+      },
+      () => processOpenClawUpdatesBatch({ now, limit: 10, fetchUpdates }),
+    );
+
+    expect(result).toEqual({ sessions: 0, messages: 0, failedMessages: 0, failedSessions: 0 });
+    expect(fetchUpdates).not.toHaveBeenCalled();
+  });
+
   it("fails closed when the OpenClaw updates worker starts without required secrets", async () => {
     await withEnv(
       {
@@ -605,6 +634,7 @@ describe("openclaw weixin runtime contract", () => {
       data: {
         qrcode: "qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         ilinkBotId: encryptProviderCredential("bot-123", testCredentialKey),
         ilinkBotHash: hashProviderCredential("bot-123", testCredentialKey),
@@ -669,6 +699,7 @@ describe("openclaw weixin runtime contract", () => {
       data: {
         qrcode: "qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         getUpdatesBuf: encryptProviderCredential("previous-buffer", testCredentialKey),
         expiresAt: new Date("2026-06-30T12:00:00.000Z"),
@@ -740,6 +771,7 @@ describe("openclaw weixin runtime contract", () => {
       data: {
         qrcode: "qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         getUpdatesBuf: encryptProviderCredential("previous-buffer", testCredentialKey),
         expiresAt: new Date("2026-06-30T12:00:00.000Z"),
@@ -766,6 +798,7 @@ describe("openclaw weixin runtime contract", () => {
       data: {
         qrcode: "qr-stale-session",
         status: "confirmed",
+        ...encryptedQr("provider-qr-stale-session"),
         botTokenCiphertext: encryptProviderCredential("bot-token", testCredentialKey),
         getUpdatesBuf: encryptProviderCredential("previous-buffer", testCredentialKey),
         expiresAt: new Date("2026-06-30T12:00:00.000Z"),
@@ -824,6 +857,13 @@ function expectRandomWechatUin(fetchMock: ReturnType<typeof vi.fn>, callIndex: n
   expect(Number.isInteger(numericValue)).toBe(true);
   expect(numericValue).toBeGreaterThanOrEqual(0);
   expect(numericValue).toBeLessThanOrEqual(0xffffffff);
+}
+
+function encryptedQr(providerQrcode: string) {
+  return {
+    providerQrcodeCiphertext: encryptProviderCredential(providerQrcode, testCredentialKey),
+    providerQrcodeHash: hashProviderCredential(providerQrcode, testCredentialKey),
+  };
 }
 
 function encryptedProviderRef(input: {

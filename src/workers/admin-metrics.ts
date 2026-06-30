@@ -1,4 +1,4 @@
-import type { Prisma, UserState } from "@prisma/client";
+import { Prisma, type UserState } from "@prisma/client";
 import { prisma } from "../storage/prisma";
 
 export type AdminOverviewInput = {
@@ -72,16 +72,38 @@ export async function recordAppError(input: {
 }): Promise<string> {
   const message = errorMessage(input.error);
   const fingerprint = `${input.source}:${message}`;
-  await prisma.appError.create({
-    data: {
-      source: input.source,
-      severity: input.severity ?? "error",
-      fingerprint,
-      message,
-      contextJson: jsonOrUndefined(input.context),
-      createdAt: input.now,
-    },
-  });
+  const data = {
+    source: input.source,
+    severity: input.severity ?? "error",
+    fingerprint,
+    message,
+    contextJson: jsonOrUndefined(input.context),
+    createdAt: input.now,
+    lastSeenAt: input.now,
+  };
+
+  try {
+    await prisma.appError.create({ data });
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    const updated = await prisma.appError.updateMany({
+      where: {
+        source: input.source,
+        fingerprint,
+        resolvedAt: null,
+      },
+      data: {
+        severity: input.severity ?? "error",
+        message,
+        contextJson: jsonOrUndefined(input.context),
+        lastSeenAt: input.now,
+        occurrenceCount: { increment: 1 },
+      },
+    });
+    if (updated.count === 0) {
+      await prisma.appError.create({ data });
+    }
+  }
   return fingerprint;
 }
 
@@ -179,11 +201,12 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
         closeReason: "timeout",
       },
     }),
-    prisma.echo.findMany({
-      where: { connection: { closedAt: { not: null } } },
-      distinct: ["connectionId"],
-      select: { connectionId: true },
-    }),
+    prisma.$queryRaw<{ count: number }[]>`
+      SELECT COUNT(DISTINCT "Echo"."connectionId")::int AS count
+      FROM "Echo"
+      INNER JOIN "Connection" ON "Connection"."id" = "Echo"."connectionId"
+      WHERE "Connection"."closedAt" IS NOT NULL
+    `,
     prisma.scheduledJob.findFirst({
       where: {
         status: { in: ["pending", "running"] },
@@ -195,7 +218,7 @@ export async function getAdminOverview(input: AdminOverviewInput): Promise<Admin
   ]);
 
   const activeOrEndingConnections = activeConnections + endingConnections;
-  const echoedClosedConnections = echoedClosedConnectionRows.length;
+  const echoedClosedConnections = echoedClosedConnectionRows[0]?.count ?? 0;
 
   return {
     generatedAt: input.now.toISOString(),
@@ -254,4 +277,8 @@ function errorMessage(error: unknown): string {
 
 function jsonOrUndefined(value: Record<string, unknown> | undefined): Prisma.InputJsonValue | undefined {
   return value as Prisma.InputJsonValue | undefined;
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }

@@ -174,6 +174,10 @@ type ClaimResult =
     };
 
 async function processOneOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<OutboxOutcome> {
+  if (await isRelayOutboxMessage(input.messageId)) {
+    return processOneRelayOutboxMessage(input);
+  }
+
   const claim = await claimOutboxMessage(input);
   if (claim.kind !== "send") return claim.kind;
 
@@ -213,6 +217,60 @@ type OutboxTransaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0
 
 async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<ClaimResult> {
   return prisma.$transaction(async (tx) => {
+    return claimOutboxMessageInTransaction(tx, input);
+  });
+}
+
+async function processOneRelayOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<OutboxOutcome> {
+  return prisma.$transaction(async (tx) => {
+    const claim = await claimOutboxMessageInTransaction(tx, input);
+    if (claim.kind !== "send") return claim.kind;
+
+    try {
+      await input.send({
+        recipientUserId: claim.recipientUserId,
+        body: claim.body,
+        idempotencyKey: claim.idempotencyKey,
+      });
+    } catch {
+      return markSendFailureInTransaction(tx, {
+        messageId: claim.messageId,
+        recipientUserId: claim.recipientUserId,
+        retryCount: claim.retryCount + 1,
+        maxRetries: input.maxRetries,
+        body: claim.body,
+        bodyWasEncrypted: claim.bodyWasEncrypted,
+        now: input.now,
+      });
+    }
+
+    const sent = await tx.messageOutbox.updateMany({
+      where: { id: claim.messageId, status: "sending" },
+      data: {
+        status: "sent",
+        sentAt: input.now,
+        bodyCiphertextOrBody: null,
+        bodyClearedAt: input.now,
+        providerWindowCheckedAt: input.now,
+      },
+    });
+    if (sent.count === 0) return "skipped";
+    return "sent";
+  }, { timeout: envInt("OUTBOX_RELAY_SEND_TRANSACTION_TIMEOUT_MS", 30_000) });
+}
+
+async function isRelayOutboxMessage(messageId: string): Promise<boolean> {
+  const message = await prisma.messageOutbox.findUnique({
+    where: { id: messageId },
+    select: { idempotencyKey: true },
+  });
+  return Boolean(message?.idempotencyKey.endsWith(":relay"));
+}
+
+async function claimOutboxMessageInTransaction(
+  tx: OutboxTransaction,
+  input: ProcessOneOutboxMessageInput,
+): Promise<ClaimResult> {
     const claimed = await tx.messageOutbox.updateMany({
       where: {
         id: input.messageId,
@@ -230,6 +288,7 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
       where: { id: input.messageId },
       select: {
         id: true,
+        connectionId: true,
         recipientUserId: true,
         idempotencyKey: true,
         bodyCiphertextOrBody: true,
@@ -252,7 +311,23 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
       });
       return { kind: "failed" };
     }
-    const decodedBody = decodeOutboxBody(storedBody);
+    let decodedBody: ReturnType<typeof decodeOutboxBody>;
+    try {
+      decodedBody = decodeOutboxBody(storedBody);
+    } catch {
+      await failClaimedMessage(tx, message.id, input.now);
+      return { kind: "failed" };
+    }
+    if (!(await canSendDecodedMessage(tx, {
+      messageId: message.id,
+      connectionId: message.connectionId,
+      recipientUserId: message.recipientUserId,
+      idempotencyKey: message.idempotencyKey,
+      bodyWasEncrypted: decodedBody.encrypted,
+      now: input.now,
+    }))) {
+      return { kind: "failed" };
+    }
 
     const maxPendingSeconds = envOptionalPositiveInt("OUTBOX_BODY_MAX_PENDING_SECONDS");
     if (maxPendingSeconds && message.createdAt <= addSeconds(input.now, -maxPendingSeconds)) {
@@ -313,7 +388,39 @@ async function claimOutboxMessage(input: ProcessOneOutboxMessageInput): Promise<
       bodyWasEncrypted: decodedBody.encrypted,
       idempotencyKey: message.idempotencyKey,
     };
+}
+
+async function canSendDecodedMessage(
+  tx: OutboxTransaction,
+  input: {
+    messageId: string;
+    connectionId: string | null;
+    recipientUserId: string;
+    idempotencyKey: string;
+    bodyWasEncrypted: boolean;
+    now: Date;
+  },
+): Promise<boolean> {
+  if (!input.idempotencyKey.endsWith(":relay")) return true;
+  if (!input.connectionId) {
+    await failClaimedMessage(tx, input.messageId, input.now);
+    return false;
+  }
+
+  await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Connection" WHERE "id" = ${input.connectionId} FOR UPDATE`;
+  const connection = await tx.connection.findUnique({
+    where: { id: input.connectionId },
+    select: { state: true, userAId: true, userBId: true },
   });
+  const canRelay =
+    connection !== null &&
+    activeConnectionStates.includes(connection.state) &&
+    (connection.userAId === input.recipientUserId || connection.userBId === input.recipientUserId);
+
+  if (!canRelay) {
+    await failClaimedMessage(tx, input.messageId, input.now);
+  }
+  return canRelay;
 }
 
 async function markSendFailure(input: {
@@ -325,29 +432,43 @@ async function markSendFailure(input: {
   bodyWasEncrypted: boolean;
   now: Date;
 }): Promise<OutboxOutcome> {
-  const exhausted = input.retryCount >= input.maxRetries;
   const updated = await prisma.$transaction(async (tx) => {
-    const marked = await tx.messageOutbox.updateMany({
-      where: { id: input.messageId, status: "sending" },
-      data: {
-        status: exhausted ? "failed" : "retrying",
-        retryCount: input.retryCount,
-        nextAttemptAt: exhausted ? input.now : addSeconds(input.now, input.retryCount * 30),
-        failedAt: exhausted ? input.now : null,
-        bodyCiphertextOrBody: exhausted ? null : input.bodyWasEncrypted ? encryptOutboxBody(input.body) : input.body,
-        bodyClearedAt: exhausted ? input.now : null,
-        providerWindowCheckedAt: null,
-      },
-    });
-    if (marked.count === 0) return 0;
-
-    await tx.user.update({
-      where: { id: input.recipientUserId },
-      data: { providerSendQuota: { increment: 1 } },
-    });
-    return marked.count;
+    return markSendFailureInTransaction(tx, input);
   });
-  if (updated === 0) return "skipped";
+  return updated;
+}
+
+async function markSendFailureInTransaction(
+  tx: OutboxTransaction,
+  input: {
+    messageId: string;
+    recipientUserId: string;
+    retryCount: number;
+    maxRetries: number;
+    body: string;
+    bodyWasEncrypted: boolean;
+    now: Date;
+  },
+): Promise<OutboxOutcome> {
+  const exhausted = input.retryCount >= input.maxRetries;
+  const marked = await tx.messageOutbox.updateMany({
+    where: { id: input.messageId, status: "sending" },
+    data: {
+      status: exhausted ? "failed" : "retrying",
+      retryCount: input.retryCount,
+      nextAttemptAt: exhausted ? input.now : addSeconds(input.now, input.retryCount * 30),
+      failedAt: exhausted ? input.now : null,
+      bodyCiphertextOrBody: exhausted ? null : input.bodyWasEncrypted ? encryptOutboxBody(input.body) : input.body,
+      bodyClearedAt: exhausted ? input.now : null,
+      providerWindowCheckedAt: null,
+    },
+  });
+  if (marked.count === 0) return "skipped";
+
+  await tx.user.update({
+    where: { id: input.recipientUserId },
+    data: { providerSendQuota: { increment: 1 } },
+  });
   return exhausted ? "failed" : "retried";
 }
 

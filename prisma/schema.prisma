@@ -275,17 +275,20 @@ model RateLimitEvent {
 }
 
 model AppError {
-  id          String    @id @default(cuid())
-  source      String
-  severity    String
-  fingerprint String
-  message     String
-  contextJson Json?
-  createdAt   DateTime  @default(now())
-  resolvedAt  DateTime?
+  id              String    @id @default(cuid())
+  source          String
+  severity        String
+  fingerprint     String
+  message         String
+  contextJson     Json?
+  createdAt       DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  occurrenceCount Int       @default(1)
+  resolvedAt      DateTime?
 
   @@index([createdAt])
   @@index([resolvedAt, severity])
+  @@index([source, fingerprint, resolvedAt])
 }
 
 model WorkerHeartbeat {

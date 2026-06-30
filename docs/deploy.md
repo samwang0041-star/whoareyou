@@ -55,11 +55,13 @@ ENTITY_CLEANUP_APP_ERROR_RETENTION_HOURS=720
 ENTITY_CLEANUP_RATE_LIMIT_RETENTION_HOURS=168
 ADMIN_LOGIN_MAX_FAILS=5
 ADMIN_LOGIN_LOCK_MS=900000
+ADMIN_LOGIN_FAILURE_MAX_RECORDS=1000
 ADMIN_ALLOWED_IPS=
 RATE_LIMIT_QR_PER_WINDOW=1
 RATE_LIMIT_QR_WINDOW_MS=10000
 RATE_LIMIT_QR_STATUS_PER_WINDOW=30
 RATE_LIMIT_QR_STATUS_WINDOW_MS=10000
+OPENCLAW_QR_STATUS_ERROR_BACKOFF_MS=10000
 RATE_LIMIT_FAKE_CALLBACK_PER_WINDOW=10
 RATE_LIMIT_FAKE_CALLBACK_WINDOW_MS=60000
 FAKE_CALLBACK_MAX_BODY_BYTES=16384
@@ -71,11 +73,11 @@ The scheduled worker self-seeds recurring `outbox_body_cleanup`, `metric_snapsho
 
 ### Public Endpoint Rate Limiting
 
-`/api/qr`, `/api/qr/status`, and (in fake mode) `/api/wechat/callback` are rate-limited in-process by client IP. Defaults are tuned for a single-replica MVP (`/api/qr`: 1 request per 10s, `/api/qr/status`: 30 per 10s, fake callback: 10 per 60s) and overridable via the `RATE_LIMIT_*` env vars. Fake callback bodies are capped by `FAKE_CALLBACK_MAX_BODY_BYTES`. The limiter is per-process; multi-replica deployments must replace it with a shared store and should still put a reverse-proxy `limit_req` (nginx/Caddy) in front as the primary defense.
+`/api/qr`, `/api/qr/status`, and (in fake mode) `/api/wechat/callback` are rate-limited in-process by client IP. Defaults are tuned for a single-replica MVP (`/api/qr`: 1 request per 10s, `/api/qr/status`: 30 per 10s, fake callback: 10 per 60s) and overridable via the `RATE_LIMIT_*` env vars. QR status provider errors also use `OPENCLAW_QR_STATUS_ERROR_BACKOFF_MS` so repeated polling does not keep hitting OpenClaw during a short error window. Fake callback bodies are capped by `FAKE_CALLBACK_MAX_BODY_BYTES`. The limiter is per-process; multi-replica deployments must replace it with a shared store and should still put a reverse-proxy `limit_req` (nginx/Caddy) in front as the primary defense.
 
 ### Admin Access Control
 
-Admin APIs use a constant-time token comparison with per-IP lockout (`ADMIN_LOGIN_MAX_FAILS` failures trigger a `ADMIN_LOGIN_LOCK_MS` cooldown, returning 429 with `Retry-After`). Set `ADMIN_ALLOWED_IPS` to a comma-separated allow-list of operator IPs (the value seen after your reverse proxy, i.e. the leftmost `x-forwarded-for` hop) to reject all other clients with 401 before the token is even checked. When unset, only the token gate applies. Ensure your reverse proxy overwrites `x-forwarded-for` so a remote client cannot spoof its IP.
+Admin APIs use a constant-time token comparison with per-IP lockout (`ADMIN_LOGIN_MAX_FAILS` failures trigger a `ADMIN_LOGIN_LOCK_MS` cooldown, returning 429 with `Retry-After`). Failed admin-auth records are pruned and capped by `ADMIN_LOGIN_FAILURE_MAX_RECORDS` to avoid unbounded process memory growth. Set `ADMIN_ALLOWED_IPS` to a comma-separated allow-list of operator IPs as seen in `X-Real-IP` after your reverse proxy. When unset, only the token gate applies. The reverse proxy must overwrite inbound proxy headers before forwarding, for example `proxy_set_header X-Real-IP $remote_addr;` and `proxy_set_header X-Forwarded-For $remote_addr;`. Do not use `$proxy_add_x_forwarded_for` as the only application-facing IP source because it preserves spoofable client-supplied leftmost values.
 
 ## Build And Release
 
@@ -89,6 +91,19 @@ DATABASE_URL="$DATABASE_URL" npm run db:migrate
 `db:migrate` runs `prisma migrate deploy` and should be the release command before starting new runtime processes.
 
 Migration `000009_openclaw_provider_ref_privacy` intentionally aborts if `UserProviderRef` already contains rows. This MVP migration is for a fresh database or a disposable demo database only; do not apply this migration to an existing production database with provider refs. A production upgrade from `000008` would need a separate runtime backfill using `PROVIDER_USER_HASH_SECRET` and `PROVIDER_CREDENTIAL_ENCRYPTION_SECRET` before dropping legacy plaintext columns.
+
+Before applying migration `000015_redact_legacy_openclaw_sessions`, verify no confirmed legacy OpenClaw sessions are still referenced by users:
+
+```sql
+SELECT COUNT(*)
+FROM "OpenClawBotSession" s
+JOIN "UserProviderRef" r ON r."botSessionId" = s."id"
+WHERE s."providerQrcodeCiphertext" IS NULL
+  AND s."providerQrcodeHash" IS NULL
+  AND s."status" = 'confirmed';
+```
+
+The count must be `0`. If it is not, rebind or backfill those sessions before deploy; the migration intentionally aborts instead of silently expiring active user bindings.
 
 ## Process Commands
 

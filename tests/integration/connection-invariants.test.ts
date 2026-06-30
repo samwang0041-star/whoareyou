@@ -157,6 +157,22 @@ describe("connection invariants", () => {
     });
   });
 
+  it("rejects self-connections in every connection state", async () => {
+    const user = await createUser("connection-self-user");
+
+    for (const state of ["active", "ending", "awaiting_echo", "closed"] as const) {
+      await expect(
+        prisma.connection.create({
+          data: {
+            userAId: user.id,
+            userBId: user.id,
+            state,
+          },
+        }),
+      ).rejects.toThrow();
+    }
+  });
+
   it("detects existing cross-column active-state conflicts during validation", async () => {
     const userA = await createUser("connection-preflight-a");
     const userB = await createUser("connection-preflight-b");

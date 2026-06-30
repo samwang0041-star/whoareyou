@@ -35,11 +35,21 @@ describe("rate-limit sliding window", () => {
 });
 
 describe("client-ip extraction", () => {
-  it("uses the leftmost x-forwarded-for entry", () => {
+  it("prefers x-real-ip over spoofable x-forwarded-for entries", () => {
+    const request = new Request("https://example.com/", {
+      headers: {
+        "x-real-ip": "198.51.100.10",
+        "x-forwarded-for": "203.0.113.1, 198.51.100.10",
+      },
+    });
+    expect(getClientIp(request)).toBe("198.51.100.10");
+  });
+
+  it("uses the rightmost valid x-forwarded-for entry when x-real-ip is absent", () => {
     const request = new Request("https://example.com/", {
       headers: { "x-forwarded-for": "203.0.113.1, 10.0.0.1" },
     });
-    expect(getClientIp(request)).toBe("203.0.113.1");
+    expect(getClientIp(request)).toBe("10.0.0.1");
   });
 
   it("falls back to x-real-ip when x-forwarded-for is absent", () => {
@@ -51,6 +61,16 @@ describe("client-ip extraction", () => {
 
   it("returns empty string when no proxy headers are present", () => {
     const request = new Request("https://example.com/");
+    expect(getClientIp(request)).toBe("");
+  });
+
+  it("ignores invalid proxy header values", () => {
+    const request = new Request("https://example.com/", {
+      headers: {
+        "x-real-ip": "not-an-ip",
+        "x-forwarded-for": "also-not-an-ip",
+      },
+    });
     expect(getClientIp(request)).toBe("");
   });
 });

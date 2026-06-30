@@ -292,14 +292,16 @@ async function processClaimedInbound(event: NormalizedInboundEvent) {
 
   if (activeConnection) {
     if (!(await canUserContinue(user.id))) return;
-    await enqueueToUser({
+    const relayed = await enqueueRelayToActivePeer({
       connectionId: activeConnection.id,
-      recipientUserId: otherParticipantId(activeConnection, user.id),
+      senderUserId: user.id,
       idempotencyKey: `${event.providerMessageKey}:relay`,
       body: command.text,
       now: event.receivedAt,
-      encryptBody: true,
     });
+    if (!relayed) {
+      await enqueueNoActiveMatch({ recipientUserId: user.id, event });
+    }
     return;
   }
 
@@ -397,7 +399,6 @@ async function enqueueToUser(input: {
   idempotencyKey: string;
   body: string;
   now: Date;
-  encryptBody?: boolean;
 }) {
   await prisma.messageOutbox.upsert({
     where: { idempotencyKey: input.idempotencyKey },
@@ -405,10 +406,44 @@ async function enqueueToUser(input: {
       connectionId: input.connectionId,
       recipientUserId: input.recipientUserId,
       idempotencyKey: input.idempotencyKey,
-      bodyCiphertextOrBody: input.encryptBody ? encryptOutboxBody(input.body) : input.body,
+      bodyCiphertextOrBody: input.body,
       nextAttemptAt: input.now,
     },
     update: {},
+  });
+}
+
+async function enqueueRelayToActivePeer(input: {
+  connectionId: string;
+  senderUserId: string;
+  idempotencyKey: string;
+  body: string;
+  now: Date;
+}): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Connection" WHERE "id" = ${input.connectionId} FOR UPDATE`;
+    const connection = await tx.connection.findFirst({
+      where: {
+        id: input.connectionId,
+        state: { in: ["active", "ending"] },
+        OR: [{ userAId: input.senderUserId }, { userBId: input.senderUserId }],
+      },
+      select: { id: true, userAId: true, userBId: true },
+    });
+    if (!connection) return false;
+
+    await tx.messageOutbox.upsert({
+      where: { idempotencyKey: input.idempotencyKey },
+      create: {
+        connectionId: connection.id,
+        recipientUserId: otherParticipantId(connection, input.senderUserId),
+        idempotencyKey: input.idempotencyKey,
+        bodyCiphertextOrBody: encryptOutboxBody(input.body),
+        nextAttemptAt: input.now,
+      },
+      update: {},
+    });
+    return true;
   });
 }
 

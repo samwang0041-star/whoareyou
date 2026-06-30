@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encryptOutboxBody } from "../../src/domain/outbox-body";
+import { closeForLeave } from "../../src/domain/safety";
 import { voice } from "../../src/domain/voice";
 import { prisma } from "../../src/storage/prisma";
 import { processOutboxBatch } from "../../src/workers/outbox";
@@ -47,6 +48,10 @@ async function withEnv<T>(updates: Record<string, string>, run: () => Promise<T>
       }
     }
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("outbox", () => {
@@ -176,6 +181,167 @@ describe("outbox", () => {
       bodyCiphertextOrBody: null,
       bodyClearedAt: now,
     });
+  });
+
+  it("does not send a queued relay when its connection has already closed", async () => {
+    const sender = await createReachableUser("outbox-relay-closed-sender");
+    const recipient = await createReachableUser("outbox-relay-closed-recipient");
+    const connection = await prisma.connection.create({
+      data: {
+        userAId: sender.id,
+        userBId: recipient.id,
+        state: "awaiting_echo",
+        startedAt: new Date("2026-06-30T09:00:00.000Z"),
+        closedAt: new Date("2026-06-30T09:59:00.000Z"),
+        closeReason: "left",
+      },
+    });
+    await prisma.messageOutbox.create({
+      data: {
+        connectionId: connection.id,
+        recipientUserId: recipient.id,
+        idempotencyKey: "outbox-closed:relay",
+        bodyCiphertextOrBody: encryptOutboxBody("should not cross a closed connection"),
+        nextAttemptAt: now,
+      },
+    });
+
+    const sent: string[] = [];
+    await processOutboxBatch({
+      now,
+      limit: 10,
+      send: async (message) => {
+        sent.push(message.body);
+      },
+    });
+
+    expect(sent).toEqual([]);
+    await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
+      status: "failed",
+      bodyCiphertextOrBody: null,
+      bodyClearedAt: now,
+    });
+    await expect(
+      prisma.user.findUniqueOrThrow({
+        where: { id: recipient.id },
+        select: { providerSendQuota: true },
+      }),
+    ).resolves.toEqual({ providerSendQuota: 999 });
+  });
+
+  it("does not let a connection close commit while a relay send is in flight", async () => {
+    const sender = await createReachableUser("outbox-relay-lock-sender");
+    const recipient = await createReachableUser("outbox-relay-lock-recipient");
+    const connection = await prisma.connection.create({
+      data: {
+        userAId: sender.id,
+        userBId: recipient.id,
+        state: "active",
+        startedAt: new Date("2026-06-30T09:00:00.000Z"),
+      },
+    });
+    await prisma.messageOutbox.create({
+      data: {
+        connectionId: connection.id,
+        recipientUserId: recipient.id,
+        idempotencyKey: "outbox-relay-lock:relay",
+        bodyCiphertextOrBody: encryptOutboxBody("arrived before close committed"),
+        nextAttemptAt: now,
+      },
+    });
+
+    let releaseSend!: () => void;
+    const sendStarted = new Promise<void>((resolve) => {
+      const originalRelease = () => resolve();
+      releaseSend = originalRelease;
+    });
+    const batch = processOutboxBatch({
+      now,
+      limit: 10,
+      send: async () => {
+        releaseSend();
+        await new Promise<void>((resolve) => {
+          releaseSend = resolve;
+        });
+      },
+    });
+
+    await sendStarted;
+
+    const closeAt = new Date("2026-06-30T10:00:10.000Z");
+    const closePromise = closeForLeave({
+      connectionId: connection.id,
+      actorUserId: sender.id,
+      now: closeAt,
+    });
+
+    await expect(Promise.race([closePromise.then(() => "closed"), sleep(50).then(() => "pending")])).resolves.toBe("pending");
+    await expect(
+      prisma.connection.findUniqueOrThrow({
+        where: { id: connection.id },
+        select: { state: true, closedAt: true },
+      }),
+    ).resolves.toEqual({ state: "active", closedAt: null });
+
+    releaseSend();
+    await batch;
+    await closePromise;
+
+    await expect(prisma.messageOutbox.findFirstOrThrow()).resolves.toMatchObject({
+      status: "sent",
+      sentAt: now,
+    });
+    await expect(prisma.connection.findUniqueOrThrow({ where: { id: connection.id } })).resolves.toMatchObject({
+      state: "awaiting_echo",
+      closeReason: "left",
+      closedAt: closeAt,
+    });
+  });
+
+  it("fails a poison encrypted body and continues with later messages", async () => {
+    const poisonRecipient = await createReachableUser("outbox-poison-recipient");
+    const healthyRecipient = await createReachableUser("outbox-after-poison-recipient");
+    await prisma.messageOutbox.createMany({
+      data: [
+        {
+          recipientUserId: poisonRecipient.id,
+          idempotencyKey: "outbox-poison",
+          bodyCiphertextOrBody: "outbox:not-valid-ciphertext",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:59:00.000Z"),
+        },
+        {
+          recipientUserId: healthyRecipient.id,
+          idempotencyKey: "outbox-after-poison",
+          bodyCiphertextOrBody: "still sends",
+          nextAttemptAt: now,
+          createdAt: new Date("2026-06-30T09:59:01.000Z"),
+        },
+      ],
+    });
+
+    const sent: string[] = [];
+    await expect(
+      processOutboxBatch({
+        now,
+        limit: 10,
+        send: async (message) => {
+          sent.push(`${message.idempotencyKey}:${message.body}`);
+        },
+      }),
+    ).resolves.toMatchObject({ processed: 2, sent: 1, failed: 1 });
+
+    expect(sent).toEqual(["outbox-after-poison:still sends"]);
+    const messages = await prisma.messageOutbox.findMany({ orderBy: { idempotencyKey: "asc" } });
+    expect(messages.map((message) => ({
+      key: message.idempotencyKey,
+      status: message.status,
+      body: message.bodyCiphertextOrBody,
+      bodyClearedAt: message.bodyClearedAt,
+    }))).toEqual([
+      { key: "outbox-after-poison", status: "sent", body: null, bodyClearedAt: now },
+      { key: "outbox-poison", status: "failed", body: null, bodyClearedAt: now },
+    ]);
   });
 
   it("marks expired provider windows unreachable without sending", async () => {

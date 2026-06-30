@@ -34,6 +34,7 @@ export async function processOpenClawUpdatesBatch(input: ProcessOpenClawUpdatesB
     const sessions = await prisma.openClawBotSession.findMany({
       where: {
         status: "confirmed",
+        providerQrcodeCiphertext: { not: null },
         botTokenCiphertext: { not: null },
       },
       orderBy: [{ updatedAt: "asc" }, { id: "asc" }],

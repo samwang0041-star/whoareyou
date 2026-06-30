@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { Prisma } from "@prisma/client";
 import type { QrProviderConfig } from "../config";
 import { prisma } from "../storage/prisma";
+import { recordAppError } from "../workers/admin-metrics";
 import { decryptProviderCredential, encryptProviderCredential, hashProviderCredential } from "./openclaw-credentials";
 import type { EntryQrResponse, EntryQrStatus } from "./openclaw";
 import { normalizeOpenClawProviderBaseUrl } from "./openclaw-url-policy";
@@ -111,7 +112,15 @@ export async function getOpenClawWeixinQrStatus(input: {
 }): Promise<EntryQrStatusResponse> {
   const existingSession = await prisma.openClawBotSession.findUnique({
     where: { qrcode: input.sessionId },
-    select: { qrcode: true, providerQrcodeCiphertext: true, status: true, expiresAt: true, redirectHost: true },
+    select: {
+      qrcode: true,
+      providerQrcodeCiphertext: true,
+      status: true,
+      providerError: true,
+      expiresAt: true,
+      updatedAt: true,
+      redirectHost: true,
+    },
   });
   if (!existingSession) {
     throw new Error("openclaw_qr_session_not_found");
@@ -130,11 +139,20 @@ export async function getOpenClawWeixinQrStatus(input: {
       expiresAt,
     };
   }
+  if (isInProviderErrorBackoff(existingSession)) {
+    throw new Error("openclaw_qr_status_backoff");
+  }
+  if (!existingSession.providerQrcodeCiphertext) {
+    await recordQrStatusProviderError({
+      sessionId: input.sessionId,
+      expiresAt,
+      error: new Error("openclaw_qr_legacy_session_requires_rescan"),
+    });
+    throw new Error("openclaw_qr_legacy_session_requires_rescan");
+  }
 
   try {
-    const providerQrcode = existingSession.providerQrcodeCiphertext
-      ? decryptProviderCredential(existingSession.providerQrcodeCiphertext, input.config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET)
-      : input.sessionId;
+    const providerQrcode = decryptProviderCredential(existingSession.providerQrcodeCiphertext, input.config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET);
     const apiUrl = new URL(
       "/ilink/bot/get_qrcode_status",
       openClawUrl(existingSession?.redirectHost ?? input.config.OPENCLAW_WEIXIN_API_BASE_URL, "/"),
@@ -348,33 +366,33 @@ async function findReusableCredential(sessionId: string, source: QrStatusSource,
 async function recordQrStatusProviderError(input: { sessionId: string; expiresAt: string; error: unknown }) {
   const message = errorMessage(input.error);
   const now = new Date();
-  await prisma.$transaction([
-    prisma.openClawBotSession.upsert({
-      where: { qrcode: input.sessionId },
-      create: {
-        qrcode: input.sessionId,
-        status: "provider_error",
-        expiresAt: new Date(input.expiresAt),
-        providerError: message,
-      },
-      update: {
-        status: "provider_error",
-        providerError: message,
-      },
-    }),
-    prisma.appError.create({
-      data: {
-        source: "openclaw-qr-status",
-        severity: "error",
-        fingerprint: `openclaw-qr-status:${message}`,
-        message,
-        contextJson: {
-          sessionHash: hashDiagnostic(input.sessionId),
-        },
-        createdAt: now,
-      },
-    }),
-  ]);
+  await prisma.openClawBotSession.upsert({
+    where: { qrcode: input.sessionId },
+    create: {
+      qrcode: input.sessionId,
+      status: "provider_error",
+      expiresAt: new Date(input.expiresAt),
+      providerError: message,
+    },
+    update: {
+      status: "provider_error",
+      providerError: message,
+    },
+  });
+  await recordAppError({
+    source: "openclaw-qr-status",
+    severity: "error",
+    error: new Error(message),
+    now,
+    context: {
+      sessionHash: hashDiagnostic(input.sessionId),
+    },
+  });
+}
+
+function isInProviderErrorBackoff(session: { status: string; providerError: string | null; updatedAt: Date }): boolean {
+  if (session.status !== "provider_error" || !session.providerError) return false;
+  return Date.now() - session.updatedAt.getTime() < envInt("OPENCLAW_QR_STATUS_ERROR_BACKOFF_MS", 10_000);
 }
 
 function mapIlinkStatus(status: string): EntryQrStatus {
@@ -412,6 +430,11 @@ function secondsUntilExpiry(expiresAt: string) {
   const expiresAtMs = Date.parse(expiresAt);
   if (Number.isNaN(expiresAtMs)) return 0;
   return Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
+}
+
+function envInt(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 function openClawEntryHeaders(config: QrProviderConfig): Record<string, string> {

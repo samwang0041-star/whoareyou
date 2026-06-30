@@ -1,19 +1,28 @@
+import { isIP } from "net";
+
 /**
  * Extract the client IP from a Request.
  *
- * Trusts only the leftmost entry of `x-forwarded-for` plus `x-real-ip`. When
- * deployed behind a reverse proxy, that proxy must overwrite these headers so a
- * remote client cannot spoof them. Deeper XFF hops are ignored on purpose.
+ * Production nginx overwrites `x-real-ip` with `$remote_addr`, while
+ * `x-forwarded-for` may include client-supplied values. Prefer the overwritten
+ * header and only use XFF as a fallback for local/test environments.
  */
 export function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) {
-    const first = forwardedFor.split(",")[0]?.trim();
-    if (first) return first;
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) {
+    const candidate = realIp.trim();
+    if (isValidIp(candidate)) return candidate;
   }
 
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) {
+    const last = forwardedFor.split(",").at(-1)?.trim();
+    if (last && isValidIp(last)) return last;
+  }
 
   return "";
+}
+
+function isValidIp(value: string): boolean {
+  return isIP(value) !== 0;
 }

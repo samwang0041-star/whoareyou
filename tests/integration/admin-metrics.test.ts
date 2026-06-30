@@ -4,12 +4,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import AdminPage from "../../app/admin/page";
 import { GET as getOverviewRoute } from "../../app/api/admin/overview/route";
 import { prisma } from "../../src/storage/prisma";
-import { getAdminOverview } from "../../src/workers/admin-metrics";
+import { getAdminOverview, recordAppError } from "../../src/workers/admin-metrics";
 
 const now = new Date("2026-06-30T10:00:00.000Z");
 const oldCreatedAt = new Date("2026-06-30T08:00:00.000Z");
 
 async function cleanDatabase() {
+  await prisma.appError.deleteMany();
   await prisma.inboundDedupe.deleteMany();
   await prisma.echo.deleteMany();
   await prisma.report.deleteMany();
@@ -272,6 +273,65 @@ describe("admin overview metrics", () => {
     });
     expect(JSON.stringify(overview)).not.toContain("provider-hash-should-not-appear");
     expect(JSON.stringify(overview)).not.toContain("body should not appear");
+  });
+
+  it("aggregates repeated active app errors by source and fingerprint", async () => {
+    const firstSeenAt = new Date("2026-06-30T10:00:00.000Z");
+    const secondSeenAt = new Date("2026-06-30T10:00:05.000Z");
+
+    const firstFingerprint = await recordAppError({
+      source: "openclaw-updates",
+      error: new Error("openclaw_getupdates_invalid"),
+      now: firstSeenAt,
+      context: { sessionHash: "first" },
+    });
+    const secondFingerprint = await recordAppError({
+      source: "openclaw-updates",
+      error: new Error("openclaw_getupdates_invalid"),
+      now: secondSeenAt,
+      context: { sessionHash: "second" },
+    });
+
+    expect(secondFingerprint).toBe(firstFingerprint);
+    const errors = await prisma.appError.findMany();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      source: "openclaw-updates",
+      fingerprint: firstFingerprint,
+      message: "openclaw_getupdates_invalid",
+      occurrenceCount: 2,
+      createdAt: firstSeenAt,
+      lastSeenAt: secondSeenAt,
+    });
+    expect(errors[0].contextJson).toEqual({ sessionHash: "second" });
+  });
+
+  it("aggregates concurrent active app errors without throwing", async () => {
+    const seenAt = new Date("2026-06-30T10:00:10.000Z");
+
+    const fingerprints = await Promise.all([
+      recordAppError({
+        source: "outbox",
+        error: new Error("provider_send_failed"),
+        now: seenAt,
+        context: { worker: "a" },
+      }),
+      recordAppError({
+        source: "outbox",
+        error: new Error("provider_send_failed"),
+        now: seenAt,
+        context: { worker: "b" },
+      }),
+    ]);
+
+    expect(new Set(fingerprints).size).toBe(1);
+    await expect(prisma.appError.findMany()).resolves.toHaveLength(1);
+    await expect(prisma.appError.findFirstOrThrow()).resolves.toMatchObject({
+      source: "outbox",
+      fingerprint: "outbox:provider_send_failed",
+      occurrenceCount: 2,
+      lastSeenAt: seenAt,
+    });
   });
 
   it("protects the overview API with a bearer admin token", async () => {

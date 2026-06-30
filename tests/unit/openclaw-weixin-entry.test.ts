@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { GET as getQrStatus } from "../../app/api/qr/status/route";
 import { decryptProviderCredential, encryptProviderCredential, hashProviderCredential } from "../../src/adapters/openclaw-credentials";
 import { loadConfig, loadQrProviderConfig } from "../../src/config";
@@ -18,8 +18,13 @@ const config = loadQrProviderConfig({
 });
 
 describe("openclaw weixin entry", () => {
+  beforeEach(() => {
+    vi.stubEnv("PROVIDER_CREDENTIAL_ENCRYPTION_SECRET", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET);
+  });
+
   afterEach(async () => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     await prisma.appError.deleteMany();
     await prisma.openClawBotSession.deleteMany();
   });
@@ -238,6 +243,7 @@ describe("openclaw weixin entry", () => {
       data: {
         qrcode: "wechat-qr-session",
         status: "waiting_to_scan",
+        ...encryptedQr("provider-wechat-qr-session"),
         expiresAt: new Date(Date.now() + 60_000),
       },
     });
@@ -280,6 +286,7 @@ describe("openclaw weixin entry", () => {
       data: {
         qrcode: "previous-qr-session",
         status: "confirmed",
+        ...encryptedQr("provider-previous-qr-session"),
         botTokenCiphertext: encryptProviderCredential("reused-bot-token", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
         ilinkBotId: encryptProviderCredential("bot-123", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
         ilinkBotHash: hashProviderCredential("bot-123", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
@@ -355,6 +362,7 @@ describe("openclaw weixin entry", () => {
       data: {
         qrcode: "different-bot-session",
         status: "confirmed",
+        ...encryptedQr("provider-different-bot-session"),
         botTokenCiphertext: encryptProviderCredential("wrong-bot-token", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
         ilinkBotId: encryptProviderCredential("bot-other", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
         ilinkBotHash: hashProviderCredential("bot-other", config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
@@ -423,6 +431,7 @@ describe("openclaw weixin entry", () => {
       data: {
         qrcode: "wechat-qr-session",
         status: "waiting_to_scan",
+        ...encryptedQr("provider-wechat-qr-session"),
         expiresAt: dbExpiresAt,
       },
     });
@@ -452,6 +461,37 @@ describe("openclaw weixin entry", () => {
       }),
     ).rejects.toThrow("openclaw_qr_session_not_found");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects legacy OpenClaw QR sessions without polling provider plaintext identifiers", async () => {
+    await prisma.openClawBotSession.create({
+      data: {
+        qrcode: "legacy-provider-qrcode",
+        status: "waiting_to_scan",
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: "scaned" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await getQrStatus(openclawStatusRequest("legacy-provider-qrcode"));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      sessionId: "legacy-provider-qrcode",
+      status: "provider_error",
+      retryable: true,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(
+      prisma.openClawBotSession.findUniqueOrThrow({
+        where: { qrcode: "legacy-provider-qrcode" },
+        select: { status: true, providerError: true },
+      }),
+    ).resolves.toEqual({
+      status: "provider_error",
+      providerError: "openclaw_qr_legacy_session_requires_rescan",
+    });
   });
 
   it("returns 404 from the status route for unknown OpenClaw sessions", async () => {
@@ -498,10 +538,10 @@ describe("openclaw weixin entry", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ href: "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=wechat-qr-session" }),
+      expect.objectContaining({ href: "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=provider-wechat-qr-session" }),
     );
     expect(fetchMock.mock.calls[1]?.[0]).toEqual(
-      expect.objectContaining({ href: "https://redirect.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=wechat-qr-session" }),
+      expect.objectContaining({ href: "https://redirect.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=provider-wechat-qr-session" }),
     );
   });
 
@@ -548,6 +588,7 @@ describe("openclaw weixin entry", () => {
       data: {
         qrcode: "wechat-qr-session",
         status: "scan_confirming",
+        ...encryptedQr("provider-wechat-qr-session"),
         redirectHost: "http://127.0.0.1:8080",
         expiresAt: new Date(Date.now() + 60_000),
       },
@@ -592,6 +633,25 @@ describe("openclaw weixin entry", () => {
       source: "openclaw-qr-status",
       message: "openclaw_qr_status_failed:502",
     });
+  });
+
+  it("does not repeatedly poll provider status during the provider-error backoff window", async () => {
+    await createQrSession("wechat-qr-session");
+    const fetchMock = vi.fn(async () => new Response("bad gateway", { status: 502 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await getQrStatus(openclawStatusRequest());
+    const second = await getQrStatus(openclawStatusRequest());
+
+    expect(first.status).toBe(502);
+    expect(second.status).toBe(502);
+    await expect(second.json()).resolves.toMatchObject({
+      sessionId: "wechat-qr-session",
+      status: "provider_error",
+      retryable: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(prisma.appError.count({ where: { source: "openclaw-qr-status" } })).resolves.toBe(1);
   });
 
   it("keeps waiting when the provider status request times out without a state change", async () => {
@@ -666,14 +726,23 @@ async function createQrSession(qrcode: string, expiresAt = new Date(Date.now() +
     create: {
       qrcode,
       status: "waiting_to_scan",
+      ...encryptedQr(`provider-${qrcode}`),
       expiresAt,
     },
     update: {
       status: "waiting_to_scan",
+      ...encryptedQr(`provider-${qrcode}`),
       expiresAt,
       providerError: null,
     },
   });
+}
+
+function encryptedQr(providerQrcode: string) {
+  return {
+    providerQrcodeCiphertext: encryptProviderCredential(providerQrcode, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
+    providerQrcodeHash: hashProviderCredential(providerQrcode, config.PROVIDER_CREDENTIAL_ENCRYPTION_SECRET),
+  };
 }
 
 function expectRandomWechatUin(fetchMock: ReturnType<typeof vi.fn>, callIndex: number) {
