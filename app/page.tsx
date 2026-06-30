@@ -36,32 +36,24 @@ type QrStatusResponse = Pick<QrResponse, "expiresAt" | "sessionId"> & {
 type Locale = "zh" | "en";
 
 const githubUrl = "https://github.com/samwang0041-star/whoareyou";
-const contactEmail = "12191628@qq.com";
+const contactEmail = "samwang0041@gmail.com";
 const pageCopy = {
   zh: {
     localeName: "中文",
     switchLabel: "EN",
     switchAria: "Switch to English",
-    topLine: "一个 AI 爱好者的小玩具",
+    topLine: "AI 工具之外",
     hour: "one hour",
     title: "UNKNOWN",
-    lead: "你以为又要接入一个 agent。\n这一次，入口后面只是一个人。",
-    subLead: "扫码，把这个微信入口留给一个也停下来的人。也许没有结论，但会有一小时是真的。",
+    lead: "不是新的 agent。\n也不是匿名社交。",
+    subLead: "把入口留在微信里。也许某一刻，会有另一个未知的信号靠近。",
     enterIdle: "进入",
     enterLoading: "入口亮起中",
     enterConnected: "入口已亮",
-    enterHelper: "扫码后，回到微信发「打开」。",
+    enterHelper: "扫码后，回到微信发「打开」。一小时。",
     connectedHelper: "回到微信，发「打开」。",
-    sideNote: "不是匿名社交，也不是一个新社区。只是 vibe coding 太久以后，做出来的一个开源小玩具。",
-    whyTitle: "为什么做这个",
-    whyLeft:
-      "AI 时代，我们不停地和 AI 对话。五小时窗口、week 窗口、token 焦虑，像一条看不见的倒计时，把人推着往前走。",
-    whyRight:
-      "AI 工具一天迭代 N 个版本，我们仿佛成了给它们做回归测试的人。工具越来越快，时间却越来越不够用。",
-    whyEnd:
-      "所以这一次，还是同一个入口，还是扫码，还是在微信里说话。但入口后面不是一个永远在线的模型，而是另一个也停下来的人。",
-    footerLine:
-      "开源，不保存昵称、头像、手机号或明文聊天记录。只是想在 vibe coding 这么久后，真的做一个自己觉得有意思的产品。",
+    sideNote: "开源。不保存昵称、头像、手机号或明文聊天。",
+    footerLine: "vibe coding 很久以后，只想做一个自己觉得有意思的小东西。",
     github: "GitHub",
     experience: "体验入口",
     contactPrefix: "如有侵权，联系",
@@ -87,6 +79,8 @@ const pageCopy = {
       providerErrorHelper: "换一个二维码，再试一次。",
       localHelper: "这不是微信服务器二维码，只用于本地模拟扫码。",
       realHelper: "扫完，回到微信发「打开」。",
+      mobileRealPrompt: "长按二维码识别",
+      mobileRealHelper: "识别后，回到微信发「打开」。",
       expiredStatus: "已熄灭",
       waitingStatus: "等你靠近",
       scanConfirmingStatus: "等你开口",
@@ -106,26 +100,18 @@ const pageCopy = {
     localeName: "English",
     switchLabel: "中",
     switchAria: "切换到中文",
-    topLine: "a small toy by an AI hobbyist",
+    topLine: "outside the tools",
     hour: "one hour",
     title: "UNKNOWN",
-    lead: "You think this is another agent endpoint.\nThis time, there is only a person behind it.",
-    subLead: "Scan with WeChat and leave the entrance open for someone else who also stopped. It may not solve anything, but the hour is real.",
+    lead: "Not another agent.\nNot anonymous social.",
+    subLead: "Leave the entrance in WeChat. At some unknown moment, another signal may come close.",
     enterIdle: "Enter",
     enterLoading: "Lighting up",
     enterConnected: "Entrance lit",
-    enterHelper: "After scanning, return to WeChat and send “打开”.",
+    enterHelper: "Scan, return to WeChat, send “打开”. One hour.",
     connectedHelper: "Return to WeChat and send “打开”.",
-    sideNote: "Not anonymous social networking, not a new community. Just a small open-source toy made after too much vibe coding.",
-    whyTitle: "Why this exists",
-    whyLeft:
-      "In the AI era, we keep talking to models. Five-hour windows, week windows, token anxiety, and context limits become a quiet countdown.",
-    whyRight:
-      "AI tools iterate many times a day. We start to feel like regression testers for the tools that were supposed to help us.",
-    whyEnd:
-      "So this uses the same entrance, the same scan, and the same WeChat conversation. But behind it is not an always-online model. It is someone else who stopped.",
-    footerLine:
-      "Open source. No nicknames, avatars, phone numbers, or readable chat history are stored. I just wanted to build something personally interesting after a long stretch of vibe coding.",
+    sideNote: "Open source. No nicknames, avatars, phone numbers, or readable chat history.",
+    footerLine: "After too much vibe coding, I wanted to make one small thing that still felt interesting.",
     github: "GitHub",
     experience: "Try it",
     contactPrefix: "If this infringes your rights, contact",
@@ -151,6 +137,8 @@ const pageCopy = {
       providerErrorHelper: "Get a new QR code and try again.",
       localHelper: "This is not a WeChat server QR code. It is only for local simulation.",
       realHelper: "After scanning, return to WeChat and send “打开”.",
+      mobileRealPrompt: "Long-press the QR code",
+      mobileRealHelper: "After it opens in WeChat, send “打开”.",
       expiredStatus: "Expired",
       waitingStatus: "Waiting",
       scanConfirmingStatus: "Waiting for words",
@@ -266,6 +254,7 @@ export default function HomePage() {
   const [isLoading, setIsLoading] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [isReady, setIsReady] = useState(false);
+  const [isCompactViewport, setIsCompactViewport] = useState(false);
   const t = pageCopy[locale];
   const modalCopy = t.modal;
   const nextLocale: Locale = locale === "zh" ? "en" : "zh";
@@ -276,6 +265,14 @@ export default function HomePage() {
       setIsReady(true);
     }, 0);
     return () => window.clearTimeout(readyTimer);
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767px)");
+    const updateViewport = () => setIsCompactViewport(query.matches);
+    updateViewport();
+    query.addEventListener("change", updateViewport);
+    return () => query.removeEventListener("change", updateViewport);
   }, []);
 
   const markEntryConnected = useCallback((source: QrResponse) => {
@@ -425,6 +422,7 @@ export default function HomePage() {
   const shouldShowQr = Boolean(entryQr && (phase === "ready" || phase === "expired"));
   const hasConnectedEntry = phase === "connected" || Boolean(connectedEntry);
   const isLocalQrPreview = entryQr?.mode === "fake" && shouldShowQr;
+  const shouldUseLongPressCopy = shouldShowQr && !isLocalQrPreview && isCompactViewport;
   const qrPrompt = isQrExpired
     ? modalCopy.expiredPrompt
     : qrStatus === "scan_confirming"
@@ -435,7 +433,9 @@ export default function HomePage() {
           ? modalCopy.providerErrorPrompt
           : isLocalQrPreview
             ? modalCopy.localPrompt
-          : modalCopy.realPrompt;
+            : shouldUseLongPressCopy
+              ? modalCopy.mobileRealPrompt
+              : modalCopy.realPrompt;
   const qrHelperText = isQrExpired
     ? modalCopy.expiredHelper
     : qrStatus === "scan_confirming"
@@ -446,7 +446,9 @@ export default function HomePage() {
           ? modalCopy.providerErrorHelper
           : isLocalQrPreview
             ? modalCopy.localHelper
-          : modalCopy.realHelper;
+            : shouldUseLongPressCopy
+              ? modalCopy.mobileRealHelper
+              : modalCopy.realHelper;
   const qrStatusLabel = isQrExpired
     ? modalCopy.expiredStatus
     : qrStatus === "waiting_to_scan"
@@ -465,11 +467,11 @@ export default function HomePage() {
   const canReopenAfterProviderError = qrStatus === "provider_error";
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#0c0b10] text-[#f7f1e8]">
-      <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 h-[100svh] min-h-[680px]">
+    <main className="relative min-h-[100svh] overflow-hidden bg-[#0c0b10] text-[#f7f1e8]">
+      <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-0 h-[100svh]">
         <Image
           alt=""
-          className="object-cover object-[50%_center] brightness-110 saturate-110 sm:object-[62%_center]"
+          className="object-cover object-[52%_center] brightness-110 saturate-110"
           data-testid="hero-main-visual"
           fill
           priority
@@ -481,7 +483,7 @@ export default function HomePage() {
         <div className="absolute inset-x-0 bottom-0 h-64 bg-[linear-gradient(180deg,rgba(12,11,16,0)_0%,#0c0b10_92%)]" />
       </div>
 
-      <section className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-between px-6 py-8 sm:px-10 sm:py-12">
+      <section className="relative z-10 mx-auto flex min-h-[100svh] w-full max-w-6xl flex-col justify-between px-6 py-7 sm:px-10 sm:py-10">
         <div className="flex items-center justify-between gap-5 text-xs text-[#9b9388]">
           <span>{t.topLine}</span>
           <div className="flex items-center gap-4">
@@ -500,14 +502,14 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="max-w-3xl py-12 sm:py-16">
-          <h1 className="text-6xl font-normal leading-none text-[#fff8ed] sm:text-8xl md:text-9xl">
+        <div className="max-w-2xl py-10 sm:py-12">
+          <h1 className="text-5xl font-normal leading-none text-[#fff8ed] sm:text-7xl md:text-8xl">
             {t.title}
           </h1>
-          <p className="mt-8 max-w-2xl whitespace-pre-line text-xl leading-9 text-[#eadfce] sm:text-2xl sm:leading-10">
+          <p className="mt-7 max-w-xl whitespace-pre-line text-xl leading-8 text-[#eadfce] sm:text-2xl sm:leading-9">
             {t.lead}
           </p>
-          <p className="mt-5 max-w-xl text-base leading-8 text-[#b8aa96] sm:text-lg sm:leading-8">
+          <p className="mt-5 max-w-md text-sm leading-7 text-[#b8aa96] sm:text-base sm:leading-7">
             {t.subLead}
           </p>
 
@@ -524,38 +526,25 @@ export default function HomePage() {
             </p>
           </div>
 
-          <div className="mt-10 max-w-xl border-l border-[#f7f1e8]/18 pl-5 text-sm leading-7 text-[#b8aa96]">
+          <div className="mt-9 max-w-md border-l border-[#f7f1e8]/18 pl-5 text-xs leading-6 text-[#9b9388] sm:text-sm">
             {t.sideNote}
           </div>
         </div>
 
-        <div className="border-t border-[#f7f1e8]/12 pt-7 text-sm leading-7 text-[#9b9388]">
-          <p className="text-[#d7cab8]">{t.whyTitle}</p>
-          <div className="mt-4 grid gap-5 md:grid-cols-2">
-            <p>{t.whyLeft}</p>
-            <p>{t.whyRight}</p>
-          </div>
-          <p className="mt-5 max-w-3xl text-[#b8aa96]">
-            {t.whyEnd}
+        <div className="flex flex-col gap-3 border-t border-[#f7f1e8]/10 pt-4 text-xs leading-6 text-[#8f867c] sm:flex-row sm:items-center sm:justify-between">
+          <p className="max-w-xl">{t.footerLine}</p>
+          <p className="flex shrink-0 flex-wrap gap-x-4 gap-y-1">
+            <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={githubUrl} rel="noreferrer" target="_blank">
+              {t.github}
+            </a>
+            <span>
+              {t.contactPrefix}{" "}
+              <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={`mailto:${contactEmail}`}>
+                {contactEmail}
+              </a>
+              {t.contactSuffix}
+            </span>
           </p>
-          <div className="mt-7 flex flex-col gap-3 border-t border-[#f7f1e8]/10 pt-5 text-xs leading-6 text-[#8f867c] sm:flex-row sm:items-start sm:justify-between">
-            <p className="max-w-3xl">{t.footerLine}</p>
-            <p className="flex shrink-0 flex-wrap gap-x-4 gap-y-1">
-              <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={githubUrl} rel="noreferrer" target="_blank">
-                {t.github}
-              </a>
-              <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href="https://ai.wangyuzhao.cn/">
-                {t.experience}
-              </a>
-              <span>
-                {t.contactPrefix}{" "}
-                <a className="text-[#d7cab8] transition hover:text-[#fff8ed]" href={`mailto:${contactEmail}`}>
-                  {contactEmail}
-                </a>
-                {t.contactSuffix}
-              </span>
-            </p>
-          </div>
         </div>
       </section>
 

@@ -78,15 +78,15 @@ test("landing page shows a ready QR entry", async ({ page }) => {
 
   await expect(page.getByTestId("hero-main-visual")).toBeVisible();
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
-  await expect(page.locator("body")).toContainText("一个 AI 爱好者的小玩具");
-  await expect(page.locator("body")).toContainText("你以为又要接入一个 agent。");
-  await expect(page.locator("body")).toContainText("这一次，入口后面只是一个人。");
-  await expect(page.locator("body")).toContainText("把这个微信入口留给一个也停下来的人");
-  await expect(page.locator("body")).toContainText("不是匿名社交，也不是一个新社区。");
-  await expect(page.locator("body")).toContainText("五小时窗口、week 窗口、token 焦虑");
-  await expect(page.locator("body")).toContainText("成了给它们做回归测试的人");
-  await expect(page.locator("body")).toContainText("开源，不保存昵称、头像、手机号或明文聊天记录。");
-  await expect(page.locator("body")).toContainText("12191628@qq.com");
+  await expect(page.locator("body")).toContainText("AI 工具之外");
+  await expect(page.locator("body")).toContainText("不是新的 agent。");
+  await expect(page.locator("body")).toContainText("也不是匿名社交。");
+  await expect(page.locator("body")).toContainText("另一个未知的信号靠近");
+  await expect(page.locator("body")).toContainText("开源。不保存昵称、头像、手机号或明文聊天。");
+  await expect(page.locator("body")).toContainText("vibe coding 很久以后");
+  await expect(page.locator("body")).toContainText("samwang0041@gmail.com");
+  await expect(page.locator("body")).not.toContainText("五小时窗口、week 窗口、token 焦虑");
+  await expect(page.locator("body")).not.toContainText("成了给它们做回归测试的人");
   await expectRejectedCopyAbsent(page);
 
   await page.getByRole("button", { name: "进入" }).click();
@@ -108,20 +108,23 @@ test("landing page can switch between Chinese and English", async ({ page }) => 
   await page.getByRole("button", { name: "Switch to English" }).click();
 
   await expect(page.getByRole("heading", { name: "UNKNOWN" })).toBeVisible();
-  await expect(page.locator("body")).toContainText("a small toy by an AI hobbyist");
-  await expect(page.locator("body")).toContainText("This time, there is only a person behind it.");
+  await expect(page.locator("body")).toContainText("outside the tools");
+  await expect(page.locator("body")).toContainText("Not another agent.");
+  await expect(page.locator("body")).toContainText("Not anonymous social.");
+  await expect(page.locator("body")).toContainText("another signal may come close");
   await expect(page.locator("body")).toContainText("Open source. No nicknames, avatars, phone numbers");
   await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
 
   await page.getByRole("button", { name: "切换到中文" }).click();
 
-  await expect(page.locator("body")).toContainText("一个 AI 爱好者的小玩具");
+  await expect(page.locator("body")).toContainText("AI 工具之外");
   await expect(page.getByRole("button", { name: "进入" })).toBeVisible();
 });
 
 test("openclaw QR entry keeps the WeChat scan copy", async ({ page }) => {
   const expiresAt = new Date(Date.now() + 299_000).toISOString();
 
+  await page.setViewportSize({ width: 1280, height: 900 });
   await routeQrStatus(page, "waiting_to_scan");
   await page.route("**/api/qr", async (route) => {
     await route.fulfill({
@@ -138,6 +141,28 @@ test("openclaw QR entry keeps the WeChat scan copy", async ({ page }) => {
   await expect(page.getByText("用微信扫一扫")).toBeVisible();
   await expect(page.getByText("扫完，回到微信发「打开」。")).toBeVisible();
   await expect(page.getByText("本地预演入口")).toHaveCount(0);
+});
+
+test("openclaw QR entry uses long-press copy on mobile", async ({ page }) => {
+  const expiresAt = new Date(Date.now() + 299_000).toISOString();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await routeQrStatus(page, "waiting_to_scan");
+  await page.route("**/api/qr", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(qrFixture({ expiresAt, mode: "openclaw" })),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "进入" }).click();
+
+  await expect(page.getByTestId("wechat-entry-dialog")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "微信里见" })).toBeVisible();
+  await expect(page.getByText("长按二维码识别")).toBeVisible();
+  await expect(page.getByText("识别后，回到微信发「打开」。")).toBeVisible();
+  await expect(page.getByText("用微信扫一扫")).toHaveCount(0);
 });
 
 test("QR code stays square on a narrow phone viewport", async ({ page }) => {
